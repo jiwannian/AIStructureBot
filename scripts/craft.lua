@@ -109,22 +109,16 @@ function craft.is_raw_resource(item_name)
 end
 
 function craft.find_nearest_resource(surface, position, resource_name)
-  local chunks = {
-    {64, 64},
-    {256, 64},
-    {1024, 256},
-    {4096, 512}
-  }
-  local best, best_dist
-  for _, step in ipairs(chunks) do
-    local radius, limit = step[1], step[2]
+  -- 不设 limit，避免每拍抽样到不同矿格，导致目的地来回跳。
+  local radii = {80, 320, 1280, 4096}
+  for _, radius in ipairs(radii) do
     local found = surface.find_entities_filtered{
       position = position,
       radius = radius,
       name = resource_name,
-      type = "resource",
-      limit = limit
+      type = "resource"
     }
+    local best, best_dist
     for _, entity in pairs(found) do
       if entity.valid and (entity.amount or 0) > 0 then
         local dist = util.distance(position, entity.position)
@@ -141,7 +135,7 @@ function craft.find_nearest_resource(surface, position, resource_name)
   return nil, nil
 end
 
-local function give(bot, player, name, count)
+local function give(bot, player, name, count, include_player)
   if count <= 0 then
     return 0
   end
@@ -149,13 +143,13 @@ local function give(bot, player, name, count)
   if util.valid_entity(bot) then
     leftover = leftover - (bot.insert({name = name, count = leftover}) or 0)
   end
-  if leftover > 0 then
+  if leftover > 0 and include_player ~= false then
     leftover = leftover - (player.insert({name = name, count = leftover}) or 0)
   end
   return count - leftover
 end
 
-function craft.mine_resource(bot, player, resource, want)
+function craft.mine_resource(bot, player, resource, want, include_player)
   if not resource or not resource.valid then
     return 0
   end
@@ -164,7 +158,7 @@ function craft.mine_resource(bot, player, resource, want)
   if take <= 0 then
     return 0
   end
-  local given = give(bot, player, resource.name, take)
+  local given = give(bot, player, resource.name, take, include_player)
   if given <= 0 then
     return 0
   end
@@ -184,31 +178,35 @@ function craft.mine_resource(bot, player, resource, want)
 end
 
 -- 按总需求一次采够：当前矿格不够就继续采附近同种矿。
-function craft.mine_enough(bot, player, resource_name, want)
+function craft.mine_enough(bot, player, resource_name, want, origin, include_player)
   local given = 0
   local remain = want
   local guard = 0
+  local from = origin or bot.position
   while remain > 0 and guard < 80 do
     guard = guard + 1
-    local ore = craft.find_nearest_resource(player.surface, bot.position, resource_name)
+    local ore = craft.find_nearest_resource(player.surface, from, resource_name)
     if not ore then
       break
     end
     if util.distance(bot.position, ore.position) > 8 then
-      return given, ore.position, remain
+      return given, ore.position, remain, ore
     end
-    local got = craft.mine_resource(bot, player, ore, remain)
+    local got = craft.mine_resource(bot, player, ore, remain, include_player)
     if got <= 0 then
       break
     end
     given = given + got
     remain = remain - got
   end
-  return given, nil, remain
+  return given, nil, remain, nil
 end
 
-local function count_have(bot, player, name)
-  local total = util.count_item(player, name)
+local function count_have(bot, player, name, include_player)
+  local total = 0
+  if include_player ~= false then
+    total = total + util.count_item(player, name)
+  end
   if util.valid_entity(bot) then
     local trunk = bot.get_inventory(defines.inventory.spider_trunk)
     if trunk then
@@ -222,7 +220,7 @@ local function count_have(bot, player, name)
   return total
 end
 
-local function take(bot, player, name, count)
+local function take(bot, player, name, count, include_player)
   local left = count
   if util.valid_entity(bot) then
     local trunk = bot.get_inventory(defines.inventory.spider_trunk)
@@ -230,7 +228,7 @@ local function take(bot, player, name, count)
       left = left - (trunk.remove({name = name, count = left}) or 0)
     end
   end
-  if left > 0 then
+  if left > 0 and include_player ~= false then
     left = left - (player.remove_item({name = name, count = left}) or 0)
   end
   return count - left
@@ -277,10 +275,14 @@ function craft.expand_needs(force, item_name, count, mines, crafts, need_machine
   end
   local machine = craft.machine_for(recipe.category)
   local hand = craft.can_hand_craft(recipe)
-  if not hand and not craft.force_has_machine(force, machine) then
+  local have_machine = craft.force_has_machine(force, machine) or (stock[machine] or 0) > 0
+  if not hand and not have_machine then
     need_machine[machine] = need_machine[machine] or {}
     table.insert(need_machine[machine], item_name)
-    return
+    -- 场上没有熔炉/组装机时，先去凑这台机器，同时继续拆原料矿，避免整条链停住。
+    if machine ~= item_name then
+      craft.expand_needs(force, machine, 1, mines, crafts, need_machine, seen, stock)
+    end
   end
   local out_each = recipe_output(recipe, item_name)
   local crafts_needed = math.ceil(count / out_each)
@@ -311,9 +313,8 @@ end
 function craft.find_nearest_tree(surface, position)
   local trees = surface.find_entities_filtered{
     position = position,
-    radius = 1024,
-    type = "tree",
-    limit = 80
+    radius = 2048,
+    type = "tree"
   }
   local best, best_dist
   for _, tree in pairs(trees) do
@@ -328,14 +329,29 @@ function craft.find_nearest_tree(surface, position)
   return best, best_dist
 end
 
-function craft.try_fulfill(player, bot, missing)
+function craft.search_origin(player, job, bot)
+  if bot and bot.valid then
+    return bot.position
+  end
+  if job and job.search_origin then
+    return job.search_origin
+  end
+  if player.character and player.character.valid then
+    return player.character.position
+  end
+  return player.position
+end
+
+function craft.try_fulfill(player, bot, missing, origin, opts)
+  opts = opts or {}
+  local include_player = opts.include_player ~= false
   local reports = {}
   local produced = false
   local need_machine = {}
   local mines = {}
   local crafts = {}
   local stock = {}
-  local contents = inventory.scan_available(player, bot, false, true)
+  local contents = inventory.scan_available(player, bot, false, include_player)
   for _, entry in pairs(contents) do
     stock[entry.name] = (stock[entry.name] or 0) + entry.count
   end
@@ -347,10 +363,11 @@ function craft.try_fulfill(player, bot, missing)
   for name, count in pairs(mines) do
     if count > 0 then
       local target, dist
+      local from = origin or bot.position
       if name == "wood" then
-        target, dist = craft.find_nearest_tree(player.surface, bot.position)
+        target, dist = craft.find_nearest_tree(player.surface, from)
       else
-        target, dist = craft.find_nearest_resource(player.surface, bot.position, name)
+        target, dist = craft.find_nearest_resource(player.surface, from, name)
       end
       if target then
         table.insert(mine_jobs, {
@@ -382,6 +399,7 @@ function craft.try_fulfill(player, bot, missing)
       return {
         action = "move",
         target = row.target.position,
+        ore = row.target,
         reports = reports,
         need_machine = need_machine,
         produced = false
@@ -393,7 +411,7 @@ function craft.try_fulfill(player, bot, missing)
       local hops = 0
       while remain > 0 and hops < 40 do
         hops = hops + 1
-        local tree = craft.find_nearest_tree(player.surface, bot.position)
+        local tree = craft.find_nearest_tree(player.surface, origin or bot.position)
         if not tree then
           break
         end
@@ -401,13 +419,14 @@ function craft.try_fulfill(player, bot, missing)
           return {
             action = "move",
             target = tree.position,
+            ore = tree,
             reports = reports,
             need_machine = need_machine,
             produced = produced
           }
         end
         tree.destroy({raise_destroy = false})
-        local got = give(bot, player, "wood", math.min(remain, 4))
+        local got = give(bot, player, "wood", math.min(remain, 4), include_player)
         got_total = got_total + got
         remain = remain - got
       end
@@ -416,7 +435,7 @@ function craft.try_fulfill(player, bot, missing)
         table.insert(reports, {kind = "mined", name = "wood", count = got_total})
       end
     else
-      local got, next_pos, remain = craft.mine_enough(bot, player, row.name, row.count)
+      local got, next_pos, remain, next_ore = craft.mine_enough(bot, player, row.name, row.count, origin, include_player)
       if got > 0 then
         produced = true
         table.insert(reports, {kind = "mined", name = row.name, count = got})
@@ -425,6 +444,7 @@ function craft.try_fulfill(player, bot, missing)
         return {
           action = "move",
           target = next_pos,
+          ore = next_ore,
           reports = reports,
           need_machine = need_machine,
           produced = produced
@@ -441,18 +461,18 @@ function craft.try_fulfill(player, bot, missing)
     local can = crafts_needed
     for _, ing in pairs(row.recipe.ingredients or {}) do
       if ing.type == "item" or not ing.type then
-        local have = count_have(bot, player, ing.name)
+        local have = count_have(bot, player, ing.name, include_player)
         can = math.min(can, math.floor(have / math.max(1, ing.amount)))
       end
     end
     if can > 0 then
       for _, ing in pairs(row.recipe.ingredients or {}) do
         if ing.type == "item" or not ing.type then
-          take(bot, player, ing.name, ing.amount * can)
+          take(bot, player, ing.name, ing.amount * can, include_player)
         end
       end
       local made = can * out_each
-      give(bot, player, row.name, made)
+      give(bot, player, row.name, made, include_player)
       produced = true
       table.insert(reports, {
         kind = "crafted",
@@ -468,6 +488,7 @@ function craft.try_fulfill(player, bot, missing)
     return {
       action = "move",
       target = mine_jobs[2].target.position,
+      ore = mine_jobs[2].target,
       reports = reports,
       need_machine = need_machine,
       produced = false

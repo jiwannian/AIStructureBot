@@ -2,8 +2,9 @@
 local gui = require("scripts.gui")
 local ai = require("scripts.ai")
 local util = require("scripts.util")
-local jobs = require("scripts.jobs")
 local plan = require("scripts.plan")
+local maintain = require("scripts.maintain")
+
 
 local function ensure_storage()
   storage.players = storage.players or {}
@@ -100,6 +101,20 @@ script.on_event(defines.events.on_player_removed, function(event)
   end
 end)
 
+script.on_event(defines.events.on_gui_opened, function(event)
+  local player = game.get_player(event.player_index)
+  if player then
+    plan.block_controller_gui(player)
+  end
+end)
+
+script.on_event(defines.events.on_pre_player_crafted_item, function(event)
+  local player = game.get_player(event.player_index)
+  if player and plan.is_on(player) then
+    plan.block_crafting(player, event)
+  end
+end)
+
 script.on_event(defines.events.on_pre_player_left_game, function(event)
   local player = game.get_player(event.player_index)
   if player then
@@ -180,6 +195,39 @@ script.on_event(defines.events.on_gui_click, function(event)
     gui.close(player)
     return
   end
+  if element.tags and element.tags.ai_bot_pick then
+    local entity = game.get_entity_by_unit_number(element.tags.ai_bot_pick)
+    if entity then
+      gui.assign_bot(player, entity)
+    end
+    return
+  end
+  if element.tags and element.tags.ai_bot_set_mode then
+    local entity = game.get_entity_by_unit_number(element.tags.ai_bot_set_mode)
+    if not entity or not entity.valid then
+      return
+    end
+    gui.assign_bot(player, entity)
+    local state = maintain.get_bot_state(entity.unit_number)
+    local next_mode = state.mode == "maintain" and "build" or "maintain"
+    maintain.set_mode(entity.unit_number, next_mode, entity.position)
+    if next_mode == "maintain" then
+      gui.player_store(player).enabled = true
+    end
+    player.print(next_mode == "maintain" and {"ai-bot.mode-switched-maintain"} or {"ai-bot.mode-switched-build"})
+    gui.player_store(player).mt_dirty = true
+    gui.refresh(player)
+    return
+  end
+  if element.tags and element.tags.ai_mt_field == "ammo" then
+    gui.apply_maintain_change(player, element.tags, element.tags.ai_mt_ammo)
+    return
+  end
+  if element.name == "ai_bot_recall" then
+    plan.recall_bot(player)
+    gui.refresh(player)
+    return
+  end
   if element.name == "ai_bot_plan" then
     plan.toggle(player)
     after_plan_toggle(player)
@@ -187,6 +235,25 @@ script.on_event(defines.events.on_gui_click, function(event)
   end
   if element.name == "ai_bot_plan_close" then
     gui.close_planner(player)
+    return
+  end
+  if element.name == "ai_bot_lineplan" then
+    gui.open_lineplan(player)
+    return
+  end
+  if element.name == "ai_bot_lineplan_close" then
+    gui.close_lineplan(player)
+    return
+  end
+  if element.tags and element.tags.ai_bot_lib_cat then
+    local store = gui.player_store(player)
+    store.library = store.library or {category = "", filter = "", selected = nil}
+    store.library.category = element.tags.ai_bot_lib_cat
+    gui.refresh_library(player)
+    return
+  end
+  if element.tags and element.tags.ai_bot_lib_id then
+    gui.give_library_blueprint(player, element.tags.ai_bot_lib_id)
     return
   end
   if element.tags and element.tags.ai_bot_plan_item then
@@ -199,36 +266,26 @@ script.on_event(defines.events.on_gui_click, function(event)
     gui.refresh(player)
     return
   end
-  if element.name == "ai_bot_toggle" then
-    local store = gui.player_store(player)
-    store.enabled = not store.enabled
+  if element.name == "ai_bot_stop" then
+    plan.stop_assign(player)
     gui.refresh(player)
     return
   end
-  if element.name == "ai_bot_assign" then
-    if not util.give_temp_tool(player, "ai-bot-assign-tool") then
+  if element.name == "ai_bot_toggle" then
+    local bot = gui.get_assigned_bot(player)
+    if not bot then
       player.print({"ai-bot.no-bot"})
+      return
     end
-    return
-  end
-  if element.name == "ai_bot_save_cursor" then
-    gui.save_cursor_blueprint(player)
-    return
-  end
-  if element.name == "ai_bot_stamp" then
-    gui.begin_stamp(player)
-    return
-  end
-  if element.name == "ai_bot_delete_bp" then
-    gui.delete_selected(player)
-    return
-  end
-  if element.name == "ai_bot_cancel_job" then
-    gui.cancel_current_job(player)
-    return
-  end
-  if element.name == "ai_bot_skip_job" then
-    gui.skip_current_job(player)
+    local state = maintain.get_bot_state(bot.unit_number)
+    state.paused = not state.paused
+    if state.paused then
+      bot.autopilot_destination = nil
+      player.print({"ai-bot.bot-paused"})
+    else
+      player.print({"ai-bot.bot-resumed"})
+    end
+    gui.refresh(player)
     return
   end
   if element.name == "ai_bot_save_settings" then
@@ -236,10 +293,6 @@ script.on_event(defines.events.on_gui_click, function(event)
     local tabs = frame and frame.ai_bot_tabs
     gui.apply_settings(player, tabs and tabs.ai_bot_tab_settings)
     return
-  end
-  if element.tags and element.tags.ai_bot_bp_id then
-    gui.player_store(player).selected_bp = element.tags.ai_bot_bp_id
-    gui.refresh(player)
   end
 end)
 
@@ -249,14 +302,29 @@ script.on_event(defines.events.on_gui_text_changed, function(event)
   if not player or not element or not element.valid then
     return
   end
-  if element.name == "ai_bot_bp_search" then
-    gui.player_store(player).bp_filter = element.text or ""
-    gui.refresh(player)
-  elseif element.name == "ai_bot_plan_search" then
+  if element.name == "ai_bot_plan_search" then
     gui.player_store(player).plan_filter = element.text or ""
     if plan.is_on(player) then
       gui.open_planner(player)
     end
+  elseif element.name == "ai_bot_lp_search" then
+    local store = gui.player_store(player)
+    store.library = store.library or {category = "", filter = "", selected = nil}
+    store.library.filter = element.text or ""
+    gui.refresh_library(player)
+  elseif element.tags and (element.tags.ai_mt_field == "min" or element.tags.ai_mt_field == "max") then
+    gui.apply_maintain_change(player, element.tags, element.text)
+  end
+end)
+
+script.on_event(defines.events.on_gui_checked_state_changed, function(event)
+  local player = game.get_player(event.player_index)
+  local element = event.element
+  if not player or not element or not element.valid then
+    return
+  end
+  if element.tags and (element.tags.ai_mt_field == "enabled" or element.tags.ai_mt_field == "repair") then
+    gui.apply_maintain_change(player, element.tags, element.state)
   end
 end)
 
@@ -269,6 +337,12 @@ script.on_event(defines.events.on_gui_value_changed, function(event)
   local value_label = parent and parent[element.name .. "_value"]
   if value_label then
     value_label.caption = tostring(math.floor(element.slider_value))
+  end
+  if element.tags and (element.tags.ai_mt_field == "min" or element.tags.ai_mt_field == "max") then
+    local player = game.get_player(event.player_index)
+    if player then
+      gui.apply_maintain_change(player, element.tags, element.slider_value)
+    end
   end
 end)
 
@@ -290,57 +364,6 @@ local function try_assign_from_selection(player, entities)
   end
   player.print({"ai-bot.no-bot"})
 end
-
-script.on_event(defines.events.on_pre_build, function(event)
-  local player = game.get_player(event.player_index)
-  if not player then
-    return
-  end
-  local store = gui.player_store(player)
-  local stamp = store.stamp
-  if not stamp then
-    return
-  end
-  local cursor = player.cursor_stack
-  if not cursor or not cursor.valid_for_read or not cursor.is_blueprint then
-    return
-  end
-  -- 接受原版蓝图落下：入队并认领随后出现的幽灵，不删不重放。
-  if event.created_by_moving and store.last_stamp_tick and event.tick - store.last_stamp_tick < 10 then
-    return
-  end
-  store.last_stamp_tick = event.tick
-  local job = gui.enqueue_blueprint(
-    player,
-    stamp.blueprint_id,
-    event.position,
-    event.direction,
-    {
-      horizontal = event.flip_horizontal,
-      vertical = event.flip_vertical,
-      mirror = event.mirror
-    }
-  )
-  store.stamp = nil
-  if job then
-    jobs.begin_claim(player, job)
-  end
-end)
-
-script.on_event(defines.events.on_player_cursor_stack_changed, function(event)
-  local player = game.get_player(event.player_index)
-  if not player then
-    return
-  end
-  local store = gui.player_store(player)
-  if not store.stamp then
-    return
-  end
-  local cursor = player.cursor_stack
-  if not cursor or not cursor.valid_for_read or not cursor.is_blueprint then
-    store.stamp = nil
-  end
-end)
 
 script.on_event(defines.events.on_player_selected_area, function(event)
   if event.item == "ai-bot-assign-tool" then
@@ -365,12 +388,8 @@ script.on_event(defines.events.on_built_entity, function(event)
     return
   end
   if player and plan.is_on(player) then
-    plan.convert_built_to_ghost(player, entity)
-    gui.restore_plan_item(player)
-    return
-  end
-  if player and (entity.type == "entity-ghost" or entity.type == "tile-ghost") then
-    jobs.attach_ghost(player, entity)
+    plan.queue_or_convert(player, entity)
+    gui.schedule_plan_restore(player)
   end
 end)
 
@@ -381,35 +400,19 @@ script.on_event(defines.events.on_player_built_tile, function(event)
   end
   if plan.is_on(player) then
     plan.convert_tiles_to_ghosts(player, event)
-    gui.restore_plan_item(player)
-    return
-  end
-  local surface = game.surfaces[event.surface_index]
-  if not surface then
-    return
-  end
-  for _, tile in pairs(event.tiles or {}) do
-    local ghosts = surface.find_entities_filtered{
-      position = tile.position,
-      type = "tile-ghost",
-      radius = 0.4
-    }
-    for _, ghost in pairs(ghosts) do
-      jobs.attach_ghost(player, ghost)
-    end
-  end
-end)
-
-script.on_nth_tick(2, function()
-  for _, player in pairs(game.connected_players) do
-    local claim = jobs.claim_window(player)
-    if claim and game.tick - claim.tick > 2 then
-      jobs.end_claim(player)
-    end
+    gui.schedule_plan_restore(player)
   end
 end)
 
 script.on_event(defines.events.on_tick, function(event)
+  plan.flush_pair_queue()
+  for _, player in pairs(game.connected_players) do
+    if plan.is_on(player) then
+      player.cheat_mode = false
+      plan.block_controller_gui(player)
+    end
+    gui.flush_plan_restore(player)
+  end
   ai.on_tick(event)
 end)
 

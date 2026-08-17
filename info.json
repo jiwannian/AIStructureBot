@@ -1,10 +1,10 @@
 {
   "name": "AIStructureBot",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "title": "AI 建造机器人",
   "author": "jiwannian",
   "homepage": "https://github.com/jiwannian/AIStructureBot",
   "factorio_version": "2.0",
   "dependencies": ["base >= 2.0"],
-  "description": "规划模式免费摆幽灵，再派 AI Bot 采集、瞬间合成并建造。进档即可用。"
+  "description": "规划模式免费摆幽灵或从蓝图库盖章，再派 AI Bot 采集、合成、建造和拆除。进档即可用。"
 }

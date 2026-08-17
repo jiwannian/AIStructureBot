@@ -229,7 +229,7 @@ function blueprint.put_on_cursor(player, export_string)
     return false
   end
   local code = cursor.import_stack(export_string)
-  if code == 1 or not cursor.valid_for_read or not cursor.is_blueprint then
+  if code == 1 or not cursor.valid_for_read or not (cursor.is_blueprint or cursor.is_blueprint_book) then
     player.clear_cursor()
     return false
   end

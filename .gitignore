@@ -3,3 +3,6 @@ Thumbs.db
 *.zip
 *.tmp
 *.log
+__pycache__/
+*.pyc
+tests/import_library.py

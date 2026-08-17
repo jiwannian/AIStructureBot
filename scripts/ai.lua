@@ -6,6 +6,8 @@ local resources = require("scripts.resources")
 local builder = require("scripts.builder")
 local gui = require("scripts.gui")
 local craft = require("scripts.craft")
+local plan = require("scripts.plan")
+local maintain = require("scripts.maintain")
 
 local ai = {}
 
@@ -69,6 +71,8 @@ local function process_job(player, store, bot, job)
   end
 
   -- 只按还没建完的幽灵计料，避免建完一座又按整单去挖矿。
+  builder.refresh_job_ghosts(player, job)
+  builder.refresh_marked(player, job)
   local need = builder.remaining_cost(job)
   if (not next(need)) and job.export then
     need = job.cost or blueprint.item_cost_from_export(job.export)
@@ -85,66 +89,87 @@ local function process_job(player, store, bot, job)
   store.last_missing = missing
 
   local range = util.player_setting(player, "ai-bot-work-range", 24)
+  -- 与复活逻辑同一套计数：只看名字，不管品质字段，避免有货却判成不能建。
   local can_build_now = false
   for _, ghost in pairs(job.ghosts or {}) do
     if ghost.valid then
       local item_name = util.item_place_name(ghost.ghost_prototype) or ghost.ghost_name
-      if item_name and util.get_count(have, item_name, ghost.quality) > 0 then
-        can_build_now = true
-        break
-      end
-    end
-  end
-
-  if next(missing) and not can_build_now then
-    local result = craft.try_fulfill(player, bot, missing)
-    if result.action == "move" and result.target then
-      job.status = "search"
-      store.last_status = "search"
-      builder.move_bot(bot, result.target)
-      if not job.craft_announced then
-        job.craft_announced = true
-        announce_wait(player, store, bot, job, missing)
-        craft.announce(player, result)
-      end
-      return
-    end
-    if result.produced then
-      have = inventory.scan_available(player, bot, include_net, include_player)
-      missing = inventory.diff(need, have)
-      store.last_missing = missing
-      if not job.last_craft_tick or game.tick - job.last_craft_tick > 60 then
-        craft.announce(player, result)
-        job.last_craft_tick = game.tick
-      end
-    elseif not job.craft_announced then
-      job.craft_announced = true
-      announce_wait(player, store, bot, job, missing)
-      craft.announce(player, result)
-    end
-    have = inventory.scan_available(player, bot, include_net, include_player)
-    for _, ghost in pairs(job.ghosts or {}) do
-      if ghost.valid then
-        local item_name = util.item_place_name(ghost.ghost_prototype) or ghost.ghost_name
-        if item_name and util.get_count(have, item_name, ghost.quality) > 0 then
+      if item_name then
+        local trunk = util.valid_entity(bot) and bot.get_inventory(defines.inventory.spider_trunk)
+        if util.count_item(trunk, item_name) > 0 or util.count_item(player, item_name) > 0 then
           can_build_now = true
           break
         end
       end
     end
-    if next(missing) and not can_build_now then
-      job.status = "search"
-      store.last_status = "search"
-      return
-    end
   end
 
-  local site = builder.nearest_ghost_position(job, bot.position)
-  if site and not builder.ghosts_in_range(bot, job, range) then
+  local going_to_mine = false
+  -- 有红图拆除时先拆，拆下来的材料可能正好补建造缺口。
+  -- 缺料就去采/合成。不要因为手里还能摆几件就整拍站着。
+  if next(missing) and not (job.marked and #job.marked > 0) then
+    -- 每只 Bot 自己锁矿点，避免多机抢同一格。
+    local bot_state = maintain.get_bot_state(bot.unit_number)
+    local locked = bot_state.mine_target or job.mine_target
+    local locked_ok = locked and locked.valid
+    if locked_ok and locked.type == "resource" then
+      local ok, amount = pcall(function()
+        return locked.amount
+      end)
+      locked_ok = ok and (amount or 0) > 0
+    end
+    if locked_ok then
+      job.status = "search"
+      store.last_status = "search"
+      builder.move_bot(bot, locked.position)
+      going_to_mine = util.distance(bot.position, locked.position) > 6
+      if not going_to_mine then
+        bot_state.mine_target = nil
+        job.mine_target = nil
+      end
+    end
+    if not going_to_mine then
+      local result = craft.try_fulfill(player, bot, missing, bot.position)
+      if result.action == "move" and result.target then
+        job.status = "search"
+        store.last_status = "search"
+        bot_state.mine_target = result.ore or bot_state.mine_target
+        builder.move_bot(bot, result.target)
+        going_to_mine = true
+        if not job.craft_announced then
+          job.craft_announced = true
+          announce_wait(player, store, bot, job, missing)
+          craft.announce(player, result)
+        end
+      elseif result.produced then
+        bot_state.mine_target = nil
+        have = inventory.scan_available(player, bot, include_net, include_player)
+        missing = inventory.diff(need, have)
+        store.last_missing = missing
+        if not job.last_craft_tick or game.tick - job.last_craft_tick > 60 then
+          craft.announce(player, result)
+          job.last_craft_tick = game.tick
+        end
+      elseif not job.craft_announced then
+        job.craft_announced = true
+        announce_wait(player, store, bot, job, missing)
+        craft.announce(player, result)
+      end
+    end
+  else
+    maintain.get_bot_state(bot.unit_number).mine_target = nil
+  end
+
+  -- 正在去矿时本拍只赶路，不要改去幽灵点，否则蜘蛛原地来回。
+  if going_to_mine then
+    return
+  end
+
+  local site = builder.nearest_work_position(job, bot.position)
+  if site and not builder.bot_in_range(bot, site, range) then
     job.status = "moving"
     store.last_status = "moving"
     builder.move_bot(bot, site)
-    return
   end
 
   if next(missing) then
@@ -158,11 +183,17 @@ local function process_job(player, store, bot, job)
     store.last_wait_reasons = {}
   end
 
-  if not job.placed or not job.ghosts or #job.ghosts == 0 then
-    local placed = builder.place_job_ghosts(player, job)
-    if placed == 0 then
-      player.print({"ai-bot.job-blocked", job.name})
-      finish_job(player, store, job, "blocked")
+  if not builder.job_has_work(job) then
+    if job.export then
+      local placed = builder.place_job_ghosts(player, job)
+      if placed == 0 then
+        player.print({"ai-bot.job-blocked", job.name})
+        finish_job(player, store, job, "blocked")
+        return
+      end
+    else
+      -- 规划幽灵和红图拆除都已清空，才收尾。
+      finish_job(player, store, job, "done")
       return
     end
   end
@@ -170,30 +201,37 @@ local function process_job(player, store, bot, job)
   job.status = "build"
   store.last_status = "build"
   local batch = util.global_setting("ai-bot-build-batch", 8)
-  local revived, remain = builder.revive_batch(player, bot, job, batch)
-  if remain == 0 then
-    if (job.built_count or 0) == 0 then
-      player.print({"ai-bot.job-blocked", job.name})
-      finish_job(player, store, job, "blocked")
-      return
+  if job.marked and #job.marked > 0 then
+    builder.deconstruct_batch(player, bot, job, batch)
+    local next_mark = job.marked[1]
+    if next_mark and next_mark.valid then
+      builder.move_bot(bot, next_mark.position)
     end
+  end
+  local revived, remain = builder.revive_batch(player, bot, job, batch)
+  builder.refresh_job_ghosts(player, job)
+  builder.refresh_marked(player, job)
+  remain = #(job.ghosts or {})
+  local marked_left = job.marked and #job.marked or 0
+  if remain == 0 and marked_left == 0 then
     player.print({
       "ai-bot.job-finished",
       job.name,
       tostring(job.entity_built or 0),
-      tostring(job.tile_built or 0)
+      tostring(job.tile_built or 0),
+      tostring(job.deconstructed or 0)
     })
     finish_job(player, store, job, "done")
-  elseif revived == 0 then
-    local next_site = builder.nearest_ghost_position(job, bot.position)
-    if next_site and not builder.bot_in_range(bot, next_site, range) then
-      job.status = "moving"
-      store.last_status = "moving"
-      builder.move_bot(bot, next_site)
-    elseif next(missing) then
-      job.status = "search"
-      store.last_status = "search"
-    end
+    return
+  end
+  if job.status == "search" then
+    return
+  end
+  local next_site = builder.nearest_work_position(job, bot.position)
+  if next_site and not builder.bot_in_range(bot, next_site, range) then
+    job.status = "moving"
+    store.last_status = "moving"
+    builder.move_bot(bot, next_site)
   end
 end
 
@@ -202,17 +240,9 @@ function ai.tick_player(player)
     return
   end
   local store = gui.player_store(player)
+  -- 召回只赶被召回的那几只，其他 Bot 继续干活。
+  plan.tick_recall(player)
   if store.planning then
-    return
-  end
-  if not store.enabled then
-    store.last_status = "disabled"
-    return
-  end
-  if not store.queue or #store.queue == 0 then
-    if store.last_status ~= "idle" and store.last_status ~= "done" then
-      store.last_status = "idle"
-    end
     return
   end
   local bot = auto_assign_bot(player)
@@ -225,17 +255,48 @@ function ai.tick_player(player)
     return
   end
   store.no_bot_announced = false
-  local job = store.queue[1]
-  local ok, err = pcall(process_job, player, store, bot, job)
-  if not ok then
-    job.status = "failed"
-    store.last_status = "failed"
-    job.fail_count = (job.fail_count or 0) + 1
-    if job.fail_count <= 2 then
-      player.print(err)
+  local maintain_bots = maintain.list_mode_bots(player, "maintain")
+  local build_bots = maintain.list_mode_bots(player, "build")
+
+  -- 每只维护 Bot 独立跑；只有一只时拿下全部任务，多只按就近认领。
+  if #maintain_bots > 0 then
+    store.last_status = "maintain"
+    for _, worker in ipairs(maintain_bots) do
+      local ok, err = pcall(maintain.tick, player, worker, maintain_bots)
+      if not ok then
+        player.print(err)
+      end
     end
-    if job.fail_count >= 3 then
-      finish_job(player, store, job, "failed")
+  end
+
+  if not store.queue or #store.queue == 0 then
+    if #maintain_bots == 0 and store.last_status ~= "idle" and store.last_status ~= "done" then
+      store.last_status = "idle"
+    end
+    return
+  end
+  if #build_bots == 0 then
+    return
+  end
+  local job = store.queue[1]
+  for _, worker in ipairs(build_bots) do
+    if maintain.get_bot_state(worker.unit_number).mode ~= "maintain" then
+      if not store.queue[1] or store.queue[1] ~= job then
+        break
+      end
+      local ok, err = pcall(process_job, player, store, worker, job)
+      if not ok then
+        job.status = "failed"
+        store.last_status = "failed"
+        job.fail_count = (job.fail_count or 0) + 1
+        if job.fail_count <= 2 then
+          player.print(err)
+        end
+        if job.fail_count >= 3 then
+          finish_job(player, store, job, "failed")
+          break
+        end
+      end
     end
   end
 end

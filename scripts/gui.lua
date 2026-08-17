@@ -2,14 +2,16 @@
 -- 不再使用全屏遮罩，避免挡住点地图盖章。
 local util = require("scripts.util")
 local inventory = require("scripts.inventory")
-local blueprint = require("scripts.blueprint")
-local jobs = require("scripts.jobs")
 local catalog = require("scripts.catalog")
+local maintain = require("scripts.maintain")
+local library = require("scripts.library")
+local blueprint = require("scripts.blueprint")
 
 local gui = {}
 
 local FRAME_NAME = "ai_bot_frame"
 local PLANNER_NAME = "ai_bot_planner"
+local LINEPLAN_NAME = "ai_bot_lineplan"
 
 local function player_store(player)
   storage.players = storage.players or {}
@@ -28,7 +30,8 @@ local function player_store(player)
     last_missing = {},
     warnings = {},
     stamp = nil,
-    plan_filter = ""
+    plan_filter = "",
+    mt_dirty = true
   }
   local store = storage.players[player.index]
   store.blueprints = store.blueprints or {}
@@ -68,50 +71,138 @@ local function add_titlebar(frame, caption, close_name)
   return bar
 end
 
-local function rebuild_queue(list, store)
+local function rebuild_bot_roster(list, player)
   list.clear()
-  if not store.queue or #store.queue == 0 then
-    list.add{type = "label", caption = {"ai-bot.queue-empty"}}
+  local store = player_store(player)
+  local bots = maintain.list_bots(player)
+  if #bots == 0 then
+    list.add{type = "label", caption = {"ai-bot.no-bot"}}
     return
   end
-  for index, job in ipairs(store.queue) do
-    local pos = job.position or {x = 0, y = 0}
-    local caption = string.format(
-      "%d. %s [%s] (%d, %d)",
-      index,
-      job.name or "?",
-      job.status or "queued",
-      math.floor(pos.x or 0),
-      math.floor(pos.y or 0)
-    )
-    list.add{type = "label", caption = caption}
+  for _, bot in ipairs(bots) do
+    local state = maintain.get_bot_state(bot.unit_number)
+    local selected = store.assigned_bot == bot.unit_number
+    local row = list.add{type = "flow", direction = "horizontal"}
+    row.add{
+      type = "button",
+      name = "ai_bot_pick_" .. bot.unit_number,
+      caption = (selected and "> #" or "#") .. bot.unit_number,
+      tags = {ai_bot_pick = bot.unit_number}
+    }
+    row.add{
+      type = "button",
+      name = "ai_bot_set_mode_" .. bot.unit_number,
+      caption = state.mode == "maintain" and {"ai-bot.mode-maintain-short"} or {"ai-bot.mode-build-short"},
+      tags = {ai_bot_set_mode = bot.unit_number}
+    }
+    if state.paused then
+      row.add{type = "label", caption = {"ai-bot.paused-mark"}}
+    end
   end
 end
 
-local function rebuild_blueprint_list(list, store, filter)
-  list.clear()
-  local count = 0
-  local ids = {}
-  for id in pairs(store.blueprints) do
-    table.insert(ids, id)
+local function rebuild_maintain_box(player)
+  local frame = player.gui.screen[FRAME_NAME]
+  if not frame or not frame.valid or not frame.ai_bot_tabs then
+    return
   end
-  table.sort(ids)
-  for _, id in ipairs(ids) do
-    local entry = store.blueprints[id]
-    local name = entry.name or ("BP-" .. id)
-    if filter == "" or string.find(string.lower(name), string.lower(filter), 1, true) then
-      local selected = store.selected_bp == id
-      list.add{
-        type = "button",
-        name = "ai_bot_bp_" .. id,
-        caption = (selected and "> " or "") .. name .. "  (" .. (entry.entity_count or 0) .. ")",
-        tags = {ai_bot_bp_id = id}
-      }
-      count = count + 1
+  local mt_tab = frame.ai_bot_tabs.ai_bot_tab_maintain
+  if not mt_tab or not mt_tab.ai_bot_mt_box then
+    return
+  end
+  local box = mt_tab.ai_bot_mt_box
+  box.clear()
+  local bot = gui.get_assigned_bot(player)
+  if not bot then
+    box.add{type = "label", caption = {"ai-bot.no-bot"}}
+    return
+  end
+  local state = maintain.ensure_rules(bot.unit_number)
+  box.add{
+    type = "checkbox",
+    name = "ai_mt_repair",
+    caption = {"ai-bot.maintain-repair"},
+    state = state.repair ~= false,
+    tags = {ai_mt_field = "repair"}
+  }
+  box.add{type = "label", caption = {"ai-bot.maintain-repair-hint"}}
+  local names = maintain.ammo_turret_names()
+  if #names == 0 then
+    box.add{type = "label", caption = {"ai-bot.maintain-empty"}}
+    return
+  end
+  for _, name in ipairs(names) do
+    local rule = state.rules[name]
+    if rule then
+      local ammo_list = maintain.compatible_ammo(name)
+      local row = box.add{type = "flow", name = "ai_mt_row_" .. name, direction = "vertical"}
+      row.add{type = "label", caption = prototypes.entity[name] and prototypes.entity[name].localised_name or name}
+      if #ammo_list == 0 then
+        row.add{type = "label", caption = {"ai-bot.maintain-no-ammo"}}
+      else
+        row.add{
+          type = "checkbox",
+          name = "ai_mt_on_" .. name,
+          caption = {"ai-bot.maintain-enable"},
+          state = rule.enabled and true or false,
+          tags = {ai_mt_turret = name, ai_mt_field = "enabled"}
+        }
+        local ammo_flow = row.add{type = "flow", direction = "horizontal"}
+        ammo_flow.add{type = "label", caption = {"ai-bot.maintain-ammo"}}
+        for _, ammo in ipairs(ammo_list) do
+          ammo_flow.add{
+            type = "sprite-button",
+            name = "ai_mt_ammo_" .. name .. "_" .. ammo,
+            sprite = "item/" .. ammo,
+            tooltip = prototypes.item[ammo] and prototypes.item[ammo].localised_name or ammo,
+            tags = {ai_mt_turret = name, ai_mt_field = "ammo", ai_mt_ammo = ammo},
+            style = rule.ammo == ammo and "yellow_slot_button" or "slot_button"
+          }
+        end
+        row.add{type = "label", name = "ai_mt_min_" .. name .. "_caption", caption = {"ai-bot.maintain-min"}}
+        local min_flow = row.add{type = "flow", name = "ai_mt_min_flow_" .. name, direction = "horizontal"}
+        min_flow.add{
+          type = "slider",
+          name = "ai_mt_min_" .. name,
+          minimum_value = 0,
+          maximum_value = 9999,
+          value = math.min(9999, rule.min or 0),
+          value_step = 1,
+          tags = {ai_mt_turret = name, ai_mt_field = "min"}
+        }
+        min_flow.add{
+          type = "textfield",
+          name = "ai_mt_min_" .. name .. "_box",
+          text = tostring(rule.min or 0),
+          numeric = true,
+          allow_decimal = false,
+          allow_negative = false,
+          lose_focus_on_confirm = true,
+          tags = {ai_mt_turret = name, ai_mt_field = "min"}
+        }.style.width = 60
+        row.add{type = "label", name = "ai_mt_max_" .. name .. "_caption", caption = {"ai-bot.maintain-max"}}
+        local max_flow = row.add{type = "flow", name = "ai_mt_max_flow_" .. name, direction = "horizontal"}
+        max_flow.add{
+          type = "slider",
+          name = "ai_mt_max_" .. name,
+          minimum_value = 0,
+          maximum_value = 9999,
+          value = math.min(9999, rule.max or 0),
+          value_step = 1,
+          tags = {ai_mt_turret = name, ai_mt_field = "max"}
+        }
+        max_flow.add{
+          type = "textfield",
+          name = "ai_mt_max_" .. name .. "_box",
+          text = tostring(rule.max or 0),
+          numeric = true,
+          allow_decimal = false,
+          allow_negative = false,
+          lose_focus_on_confirm = true,
+          tags = {ai_mt_turret = name, ai_mt_field = "max"}
+        }.style.width = 60
+      end
     end
-  end
-  if count == 0 then
-    list.add{type = "label", caption = {"ai-bot.no-blueprint"}}
   end
 end
 
@@ -158,20 +249,27 @@ function gui.refresh(player)
     if main.ai_bot_bot_label then
       main.ai_bot_bot_label.caption = store.assigned_bot and ("#" .. store.assigned_bot) or {"ai-bot.no-bot"}
     end
+    if main.ai_bot_recall then
+      local bot = gui.get_assigned_bot(player)
+      local recalling = bot and maintain.get_bot_state(bot.unit_number).recalling
+      main.ai_bot_recall.caption = recalling and {"ai-bot.recall-cancel"} or {"ai-bot.recall"}
+    end
     if main.ai_bot_plan then
       main.ai_bot_plan.caption = store.planning and {"ai-bot.plan-stop"} or {"ai-bot.plan-start"}
     end
     if main.ai_bot_toggle then
-      main.ai_bot_toggle.caption = store.enabled and {"ai-bot.toggle-bot-off"} or {"ai-bot.toggle-bot"}
+      local bot = gui.get_assigned_bot(player)
+      local paused = bot and maintain.get_bot_state(bot.unit_number).paused
+      main.ai_bot_toggle.caption = paused and {"ai-bot.toggle-bot"} or {"ai-bot.toggle-bot-off"}
     end
-    if main.ai_bot_queue then
-      rebuild_queue(main.ai_bot_queue, store)
+    if main.ai_bot_roster then
+      rebuild_bot_roster(main.ai_bot_roster, player)
     end
   end
 
-  local bp_tab = tabs.ai_bot_tab_blueprints
-  if bp_tab and bp_tab.ai_bot_bp_list then
-    rebuild_blueprint_list(bp_tab.ai_bot_bp_list, store, store.bp_filter or "")
+  if store.mt_dirty then
+    rebuild_maintain_box(player)
+    store.mt_dirty = false
   end
 
   local res_tab = tabs.ai_bot_tab_resources
@@ -207,15 +305,23 @@ function gui.refresh(player)
   end
 end
 
+function gui.close_lineplan(player)
+  util.safe_destroy(player.gui.screen[LINEPLAN_NAME])
+end
+
 function gui.close_planner(player)
   util.safe_destroy(player.gui.screen[PLANNER_NAME])
+  gui.close_lineplan(player)
 end
 
 function gui.give_plan_item(player, item_name)
   if not item_name or not prototypes.item[item_name] then
     return
   end
-  player_store(player).plan_item = item_name
+  local store = player_store(player)
+  store.plan_item = item_name
+  store.lib_export = nil
+  store.lib_id = nil
   if not player.clear_cursor() then
     return
   end
@@ -227,16 +333,42 @@ function gui.give_plan_item(player, item_name)
   end
 end
 
+function gui.schedule_plan_restore(player)
+  local store = player_store(player)
+  if store.planning and (store.lib_export or store.plan_item) then
+    store.plan_restore_tick = game.tick + 1
+  end
+end
+
+function gui.flush_plan_restore(player)
+  local store = player_store(player)
+  if store.plan_restore_tick and game.tick >= store.plan_restore_tick then
+    store.plan_restore_tick = nil
+    gui.restore_plan_item(player)
+  end
+end
+
 function gui.restore_plan_item(player)
   local store = player_store(player)
-  if not store.planning or not store.plan_item then
+  if not store.planning then
     return
   end
   local cursor = player.cursor_stack
-  if cursor and cursor.valid_for_read and cursor.name == store.plan_item then
+  if cursor and cursor.valid_for_read then
+    if store.lib_export and (cursor.is_blueprint or cursor.is_blueprint_book) then
+      return
+    end
+    if store.plan_item and (cursor.name == store.plan_item or cursor.is_blueprint) then
+      return
+    end
+  end
+  if store.lib_export then
+    blueprint.put_on_cursor(player, store.lib_export)
     return
   end
-  gui.give_plan_item(player, store.plan_item)
+  if store.plan_item then
+    gui.give_plan_item(player, store.plan_item)
+  end
 end
 
 function gui.open_planner(player)
@@ -251,6 +383,7 @@ function gui.open_planner(player)
   frame.style.maximal_width = 560
   add_titlebar(frame, {"ai-bot.planner-title"}, "ai_bot_plan_close")
   frame.add{type = "label", caption = {"ai-bot.planner-hint"}}
+  frame.add{type = "button", name = "ai_bot_lineplan", caption = {"ai-bot.lineplan-open"}}
   local search = frame.add{
     type = "textfield",
     name = "ai_bot_plan_search",
@@ -277,6 +410,109 @@ function gui.open_planner(player)
   local resolution = player.display_resolution
   local scale = player.display_scale or 1
   frame.location = {x = 40, y = math.floor(resolution.height / scale / 2 - 240)}
+end
+
+local function library_store(player)
+  local store = player_store(player)
+  store.library = store.library or {category = "", filter = "", selected = nil}
+  return store.library
+end
+
+local function fill_library_categories(parent, lib)
+  parent.clear()
+  local cats = {{id = "", caption = {"ai-bot.library-all"}}}
+  for _, category in ipairs(library.categories()) do
+    table.insert(cats, {id = category, caption = category})
+  end
+  for index, cat in ipairs(cats) do
+    parent.add{
+      type = "button",
+      name = "ai_bot_lib_cat_" .. tostring(index),
+      caption = cat.caption,
+      tags = {ai_bot_lib_cat = cat.id},
+      style = (lib.category or "") == cat.id and "green_button" or "button"
+    }
+  end
+end
+
+local function fill_library_list(list, lib)
+  list.clear()
+  local entries = library.entries(lib.category ~= "" and lib.category or nil, lib.filter or "")
+  if #entries == 0 then
+    list.add{type = "label", caption = {"ai-bot.library-empty"}}
+    return
+  end
+  local last_cat = nil
+  for _, item in ipairs(entries) do
+    if (not lib.category or lib.category == "") and item.category ~= last_cat then
+      list.add{type = "label", caption = item.category, style = "caption_label"}
+      last_cat = item.category
+    end
+    list.add{
+      type = "button",
+      name = "ai_bot_lib_item_" .. tostring(item.id),
+      caption = item.name,
+      tags = {ai_bot_lib_id = item.id},
+      style = lib.selected == item.id and "green_button" or "button"
+    }
+  end
+end
+
+function gui.refresh_library(player)
+  local frame = player.gui.screen[LINEPLAN_NAME]
+  if not frame then
+    return
+  end
+  local lib = library_store(player)
+  if frame.ai_bot_lib_cats then
+    fill_library_categories(frame.ai_bot_lib_cats, lib)
+  end
+  if frame.ai_bot_lib_list then
+    fill_library_list(frame.ai_bot_lib_list, lib)
+  end
+  if frame.ai_bot_lib_picked then
+    local item = lib.selected and library.get(lib.selected)
+    frame.ai_bot_lib_picked.caption = item and {"", {"ai-bot.library-selected"}, " ", item.name} or {"ai-bot.library-pick"}
+  end
+end
+
+function gui.open_lineplan(player)
+  gui.close_lineplan(player)
+  local lib = library_store(player)
+  local frame = player.gui.screen.add{type = "frame", name = LINEPLAN_NAME, direction = "vertical"}
+  frame.style.minimal_width = 420
+  frame.style.maximal_width = 560
+  add_titlebar(frame, {"ai-bot.lineplan-title"}, "ai_bot_lineplan_close")
+  frame.add{type = "label", caption = {"ai-bot.lineplan-hint"}}
+  frame.add{type = "label", caption = {"ai-bot.library-source"}}
+  local search = frame.add{type = "textfield", name = "ai_bot_lp_search", text = lib.filter or ""}
+  search.style.maximal_width = 500
+  local cats = frame.add{type = "table", name = "ai_bot_lib_cats", column_count = 4}
+  cats.style.horizontally_stretchable = true
+  local pane = frame.add{type = "scroll-pane", name = "ai_bot_lib_list"}
+  pane.style.maximal_height = 360
+  pane.style.minimal_width = 400
+  frame.add{type = "label", name = "ai_bot_lib_picked", caption = {"ai-bot.library-pick"}}
+  local resolution = player.display_resolution
+  local scale = player.display_scale or 1
+  frame.location = {x = math.floor(resolution.width / scale / 2 - 210), y = 80}
+  gui.refresh_library(player)
+end
+
+function gui.give_library_blueprint(player, id)
+  local ok, item = library.put_on_cursor(player, id)
+  local store = player_store(player)
+  if not ok or not item then
+    player.print({"ai-bot.library-fail"})
+    return
+  end
+  store.lib_export = item.export
+  store.lib_id = id
+  store.plan_item = nil
+  local lib = library_store(player)
+  lib.selected = id
+  player.print({"ai-bot.library-ready", item.name})
+  gui.refresh_library(player)
 end
 
 function gui.close(player)
@@ -310,36 +546,18 @@ function gui.open(player)
   main.add{type = "label", caption = {"ai-bot.how-to"}}
   main.add{type = "label", name = "ai_bot_status", caption = {"ai-bot.status-idle"}}
   main.add{type = "label", name = "ai_bot_bot_label", caption = {"ai-bot.no-bot"}}
+  main.add{type = "label", caption = {"ai-bot.roster-title"}, style = "caption_label"}
+  local roster = main.add{type = "scroll-pane", name = "ai_bot_roster"}
+  roster.style.maximal_height = 160
   local plan_flow = main.add{type = "flow", direction = "horizontal"}
   plan_flow.add{type = "button", name = "ai_bot_plan", caption = {"ai-bot.plan-start"}}
   plan_flow.add{type = "button", name = "ai_bot_build", caption = {"ai-bot.assign-ghosts"}}
+  plan_flow.add{type = "button", name = "ai_bot_stop", caption = {"ai-bot.job-stop"}}
   local actions = main.add{type = "flow", direction = "horizontal"}
-  actions.add{type = "button", name = "ai_bot_toggle", caption = {"ai-bot.toggle-bot"}}
-  actions.add{type = "button", name = "ai_bot_assign", caption = {"ai-bot.assign-bot"}}
-  local queue_actions = main.add{type = "flow", direction = "horizontal"}
-  queue_actions.add{type = "button", name = "ai_bot_cancel_job", caption = {"ai-bot.cancel-job"}}
-  queue_actions.add{type = "button", name = "ai_bot_skip_job", caption = {"ai-bot.skip-job"}}
-  main.add{type = "label", caption = {"ai-bot.queue-title"}, style = "caption_label"}
-  local queue = main.add{type = "scroll-pane", name = "ai_bot_queue"}
-  queue.style.maximal_height = 180
+  actions.add{type = "button", name = "ai_bot_recall", caption = {"ai-bot.recall"}}
+  actions.add{type = "button", name = "ai_bot_toggle", caption = {"ai-bot.toggle-bot-off"}}
   main.add{type = "label", caption = {"ai-bot.close-hint"}}
   tabs.add_tab(tab_main, main)
-
-  local tab_bp = tabs.add{type = "tab", name = "tab_bp", caption = {"ai-bot.tab-blueprints"}}
-  local bp = tabs.add{type = "flow", name = "ai_bot_tab_blueprints", direction = "vertical"}
-  bp.add{
-    type = "textfield",
-    name = "ai_bot_bp_search",
-    text = store.bp_filter or "",
-    lose_focus_on_confirm = true
-  }
-  local bp_actions = bp.add{type = "flow", direction = "horizontal"}
-  bp_actions.add{type = "button", name = "ai_bot_save_cursor", caption = {"ai-bot.save-cursor"}}
-  bp_actions.add{type = "button", name = "ai_bot_stamp", caption = {"ai-bot.stamp-selected"}}
-  bp_actions.add{type = "button", name = "ai_bot_delete_bp", caption = {"ai-bot.delete-selected"}}
-  local bp_list = bp.add{type = "scroll-pane", name = "ai_bot_bp_list"}
-  bp_list.style.maximal_height = 260
-  tabs.add_tab(tab_bp, bp)
 
   local tab_res = tabs.add{type = "tab", name = "tab_res", caption = {"ai-bot.tab-resources"}}
   local res = tabs.add{type = "flow", name = "ai_bot_tab_resources", direction = "vertical"}
@@ -368,12 +586,6 @@ function gui.open(player)
   add_slider("ai_bot_set_timeout", {"ai-bot.settings-timeout"}, util.player_setting(player, "ai-bot-wait-timeout", 180), 10, 600, 10)
   setf.add{
     type = "checkbox",
-    name = "ai_bot_set_autostart",
-    caption = {"ai-bot.settings-autostart"},
-    state = util.player_setting(player, "ai-bot-auto-start", false)
-  }
-  setf.add{
-    type = "checkbox",
     name = "ai_bot_set_force",
     caption = {"ai-bot.settings-force"},
     state = util.player_setting(player, "ai-bot-force-build", false)
@@ -393,6 +605,13 @@ function gui.open(player)
   setf.add{type = "button", name = "ai_bot_save_settings", caption = {"gui.confirm"}}
   tabs.add_tab(tab_set, setf)
 
+  local tab_mt = tabs.add{type = "tab", name = "tab_mt", caption = {"ai-bot.tab-maintain"}}
+  local mt = tabs.add{type = "flow", name = "ai_bot_tab_maintain", direction = "vertical"}
+  mt.add{type = "label", caption = {"ai-bot.maintain-hint"}}
+  local mt_box = mt.add{type = "scroll-pane", name = "ai_bot_mt_box"}
+  mt_box.style.maximal_height = 360
+  tabs.add_tab(tab_mt, mt)
+
   if store.menu_location then
     frame.location = store.menu_location
   else
@@ -405,6 +624,7 @@ function gui.open(player)
   end
 
   player.opened = frame
+  store.mt_dirty = true
   gui.refresh(player)
 end
 
@@ -434,11 +654,59 @@ function gui.assign_bot(player, entity)
   local store = player_store(player)
   if entity and entity.valid and entity.name == "ai-structure-bot" then
     store.assigned_bot = entity.unit_number
+    store.mt_dirty = true
     player.print({"ai-bot.bot-assigned", tostring(entity.unit_number)})
     gui.refresh(player)
     return true
   end
   return false
+end
+
+function gui.apply_maintain_change(player, tags, value)
+  local bot = gui.get_assigned_bot(player)
+  if not bot or not tags then
+    return
+  end
+  if tags.ai_mt_field == "repair" then
+    maintain.update_rule(bot.unit_number, nil, "repair", value)
+    return
+  end
+  if not tags.ai_mt_turret then
+    return
+  end
+  local rule = maintain.update_rule(bot.unit_number, tags.ai_mt_turret, tags.ai_mt_field, value)
+  if not rule then
+    return
+  end
+  if tags.ai_mt_field == "ammo" or tags.ai_mt_field == "enabled" then
+    player_store(player).mt_dirty = true
+    gui.refresh(player)
+    return
+  end
+  local frame = player.gui.screen[FRAME_NAME]
+  local box = frame and frame.ai_bot_tabs and frame.ai_bot_tabs.ai_bot_tab_maintain and frame.ai_bot_tabs.ai_bot_tab_maintain.ai_bot_mt_box
+  local row = box and box["ai_mt_row_" .. tags.ai_mt_turret]
+  if not row then
+    return
+  end
+  local min_flow = row["ai_mt_min_flow_" .. tags.ai_mt_turret]
+  local max_flow = row["ai_mt_max_flow_" .. tags.ai_mt_turret]
+  local min_slider = min_flow and min_flow["ai_mt_min_" .. tags.ai_mt_turret]
+  local max_slider = max_flow and max_flow["ai_mt_max_" .. tags.ai_mt_turret]
+  local min_box = min_flow and min_flow["ai_mt_min_" .. tags.ai_mt_turret .. "_box"]
+  local max_box = max_flow and max_flow["ai_mt_max_" .. tags.ai_mt_turret .. "_box"]
+  if min_slider then
+    min_slider.slider_value = math.min(9999, rule.min or 0)
+  end
+  if max_slider then
+    max_slider.slider_value = math.min(9999, rule.max or 0)
+  end
+  if min_box and min_box.text ~= tostring(rule.min or 0) then
+    min_box.text = tostring(rule.min or 0)
+  end
+  if max_box and max_box.text ~= tostring(rule.max or 0) then
+    max_box.text = tostring(rule.max or 0)
+  end
 end
 
 function gui.save_location(player, element)
@@ -468,134 +736,10 @@ function gui.apply_settings(player, setf)
   write_slider("ai_bot_set_reserve", "ai-bot-reserve-stock")
   write_slider("ai_bot_set_range", "ai-bot-work-range")
   write_slider("ai_bot_set_timeout", "ai-bot-wait-timeout")
-  player_settings["ai-bot-auto-start"] = {value = setf.ai_bot_set_autostart.state}
   player_settings["ai-bot-force-build"] = {value = setf.ai_bot_set_force.state}
   player_settings["ai-bot-take-from-network"] = {value = setf.ai_bot_set_network.state}
   player_settings["ai-bot-take-from-player"] = {value = setf.ai_bot_set_player.state}
   player.print({"ai-bot.settings-saved"})
-end
-
-function gui.begin_stamp(player, blueprint_id)
-  local store = player_store(player)
-  local entry = store.blueprints[blueprint_id or store.selected_bp]
-  if not entry then
-    player.print({"ai-bot.no-blueprint"})
-    return
-  end
-  store.selected_bp = entry.id
-  store.stamp = {
-    blueprint_id = entry.id,
-    export = entry.export,
-    name = entry.name
-  }
-  if blueprint.put_on_cursor(player, entry.export) then
-    player.print({"ai-bot.stamp-ready", entry.name})
-  else
-    store.stamp = nil
-    player.print({"ai-bot.no-cursor-blueprint"})
-  end
-end
-
-function gui.cancel_stamp(player)
-  local store = player_store(player)
-  if not store.stamp then
-    return
-  end
-  store.stamp = nil
-  local cursor = player.cursor_stack
-  if cursor and cursor.valid_for_read and cursor.is_blueprint then
-    player.clear_cursor()
-  end
-  player.print({"ai-bot.stamp-cancelled"})
-end
-
-function gui.is_stamping(player)
-  return player_store(player).stamp ~= nil
-end
-
-function gui.enqueue_blueprint(player, blueprint_id, position, direction, flip)
-  local store = player_store(player)
-  local entry = store.blueprints[blueprint_id or store.selected_bp]
-  if not entry then
-    player.print({"ai-bot.no-blueprint"})
-    return nil
-  end
-  local job, duplicated = jobs.enqueue(player, entry, position, direction, flip)
-  if not duplicated then
-    player.print({
-      "ai-bot.blueprint-enqueued",
-      entry.name,
-      tostring(math.floor(position.x)),
-      tostring(math.floor(position.y))
-    })
-  end
-  gui.refresh(player)
-  return job
-end
-
-function gui.save_cursor_blueprint(player)
-  local store = player_store(player)
-  local saved, err = blueprint.save_from_player(player, store)
-  if not saved then
-    player.print({"ai-bot." .. (err or "no-cursor-blueprint")})
-    return
-  end
-  store.selected_bp = saved[1].id
-  player.print({"ai-bot.blueprint-saved", saved[1].name})
-  if util.player_setting(player, "ai-bot-auto-start", false) then
-    gui.begin_stamp(player, saved[1].id)
-  end
-  gui.refresh(player)
-end
-
-function gui.delete_selected(player)
-  local store = player_store(player)
-  if store.selected_bp then
-    store.blueprints[store.selected_bp] = nil
-    store.selected_bp = nil
-    gui.refresh(player)
-  end
-end
-
-function gui.cancel_current_job(player)
-  local store = player_store(player)
-  local job = store.queue[1]
-  if not job then
-    return
-  end
-  for _, ghost in pairs(job.ghosts or {}) do
-    if ghost.valid then
-      ghost.destroy()
-    end
-  end
-  inventory.clear_bot_requests(gui.get_assigned_bot(player))
-  table.remove(store.queue, 1)
-  store.last_status = #store.queue > 0 and "queued" or "idle"
-  player.print({"ai-bot.job-cancelled", job.name})
-  gui.refresh(player)
-end
-
-function gui.skip_current_job(player)
-  local store = player_store(player)
-  local job = store.queue[1]
-  if not job then
-    return
-  end
-  for _, ghost in pairs(job.ghosts or {}) do
-    if ghost.valid then
-      ghost.destroy()
-    end
-  end
-  inventory.clear_bot_requests(gui.get_assigned_bot(player))
-  job.placed = false
-  job.ghosts = {}
-  job.status = "queued"
-  job.wait_started = nil
-  job.waiting_announced = nil
-  table.remove(store.queue, 1)
-  table.insert(store.queue, job)
-  player.print({"ai-bot.job-skipped", job.name})
-  gui.refresh(player)
 end
 
 return gui

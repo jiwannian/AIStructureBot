@@ -135,31 +135,6 @@ data:extend({
     }
   },
   {
-    type = "selection-tool",
-    name = "ai-bot-stamp-tool",
-    icons = {{icon = "__base__/graphics/icons/blueprint.png", icon_size = 64}},
-    flags = {"not-stackable", "only-in-cursor", "spawnable"},
-    hidden = true,
-    subgroup = "tool",
-    order = "c[automated-construction]-e[ai-bot-stamp]",
-    stack_size = 1,
-    select = {
-      border_color = {r = 0.25, g = 0.75, b = 1.0},
-      cursor_box_type = "copy",
-      mode = {"nothing"}
-    },
-    alt_select = {
-      border_color = {r = 1.0, g = 0.75, b = 0.2},
-      cursor_box_type = "not-allowed",
-      mode = {"nothing"}
-    },
-    reverse_select = {
-      border_color = {r = 0.7, g = 0.4, b = 1.0},
-      cursor_box_type = "copy",
-      mode = {"nothing"}
-    }
-  },
-  {
     type = "custom-input",
     name = "ai-bot-toggle-menu",
     key_sequence = "F1",

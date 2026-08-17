@@ -109,10 +109,25 @@ function util.item_place_name(proto)
     return nil
   end
   local items = proto.items_to_place_this
-  if items and items[1] and items[1].name then
-    return items[1].name
+  if items then
+    if items[1] and items[1].name then
+      return items[1].name
+    end
+    for _, item in pairs(items) do
+      if item and item.name then
+        return item.name
+      end
+    end
   end
-  return nil
+  local props = proto.mineable_properties
+  if props and props.products then
+    for _, product in pairs(props.products) do
+      if product.type == "item" and product.name then
+        return product.name
+      end
+    end
+  end
+  return proto.name
 end
 
 function util.next_cardinal(direction)
