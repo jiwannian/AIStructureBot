@@ -101,41 +101,52 @@ local function rebuild_bot_roster(list, player)
   end
 end
 
-local function rebuild_maintain_box(player)
+local function maintain_pane(player, name)
   local frame = player.gui.screen[FRAME_NAME]
-  if not frame or not frame.valid or not frame.ai_bot_tabs then
+  local mt = frame and frame.ai_bot_tabs and frame.ai_bot_tabs.ai_bot_tab_maintain
+  local tabs = mt and mt.ai_bot_mt_tabs
+  return tabs and tabs[name]
+end
+
+local function rebuild_maintain_box(player)
+  local repair_box = maintain_pane(player, "ai_bot_mt_repair")
+  local ammo_box = maintain_pane(player, "ai_bot_mt_ammo")
+  local fuel_box = maintain_pane(player, "ai_bot_mt_fuel")
+  if not repair_box or not ammo_box or not fuel_box then
     return
   end
-  local mt_tab = frame.ai_bot_tabs.ai_bot_tab_maintain
-  if not mt_tab or not mt_tab.ai_bot_mt_box then
-    return
-  end
-  local box = mt_tab.ai_bot_mt_box
-  box.clear()
+  repair_box.clear()
+  ammo_box.clear()
+  fuel_box.clear()
   local bot = gui.get_assigned_bot(player)
   if not bot then
-    box.add{type = "label", caption = {"ai-bot.no-bot"}}
+    repair_box.add{type = "label", caption = {"ai-bot.no-bot"}}
+    ammo_box.add{type = "label", caption = {"ai-bot.no-bot"}}
+    fuel_box.add{type = "label", caption = {"ai-bot.no-bot"}}
     return
   end
-  local state = maintain.ensure_rules(bot.unit_number)
-  box.add{
+  local state = maintain.ensure_rules(bot.unit_number, player)
+  repair_box.add{
     type = "checkbox",
     name = "ai_mt_repair",
     caption = {"ai-bot.maintain-repair"},
     state = state.repair ~= false,
     tags = {ai_mt_field = "repair"}
   }
-  box.add{type = "label", caption = {"ai-bot.maintain-repair-hint"}}
+  repair_box.add{type = "label", caption = {"ai-bot.maintain-repair-hint"}}
   local names = maintain.ammo_turret_names()
+  local fuel_names = maintain.fuel_machine_names()
   if #names == 0 then
-    box.add{type = "label", caption = {"ai-bot.maintain-empty"}}
-    return
+    ammo_box.add{type = "label", caption = {"ai-bot.maintain-empty"}}
+  end
+  if #fuel_names == 0 then
+    fuel_box.add{type = "label", caption = {"ai-bot.maintain-fuel-empty"}}
   end
   for _, name in ipairs(names) do
     local rule = state.rules[name]
     if rule then
       local ammo_list = maintain.compatible_ammo(name)
-      local row = box.add{type = "flow", name = "ai_mt_row_" .. name, direction = "vertical"}
+      local row = ammo_box.add{type = "flow", name = "ai_mt_row_" .. name, direction = "vertical"}
       row.add{type = "label", caption = prototypes.entity[name] and prototypes.entity[name].localised_name or name}
       if #ammo_list == 0 then
         row.add{type = "label", caption = {"ai-bot.maintain-no-ammo"}}
@@ -200,6 +211,79 @@ local function rebuild_maintain_box(player)
           allow_negative = false,
           lose_focus_on_confirm = true,
           tags = {ai_mt_turret = name, ai_mt_field = "max"}
+        }.style.width = 60
+      end
+    end
+  end
+  for _, name in ipairs(fuel_names) do
+    local rule = state.fuel_rules and state.fuel_rules[name]
+    if rule then
+      local fuel_list = maintain.compatible_fuel(name)
+      local row = fuel_box.add{type = "flow", name = "ai_mt_fuel_row_" .. name, direction = "vertical"}
+      row.add{type = "label", caption = prototypes.entity[name] and prototypes.entity[name].localised_name or name}
+      if #fuel_list == 0 then
+        row.add{type = "label", caption = {"ai-bot.maintain-no-fuel"}}
+      else
+        row.add{
+          type = "checkbox",
+          name = "ai_mt_fuel_on_" .. name,
+          caption = {"ai-bot.maintain-fuel-enable"},
+          state = rule.enabled and true or false,
+          tags = {ai_mt_fuel = name, ai_mt_field = "enabled"}
+        }
+        local fuel_flow = row.add{type = "flow", direction = "horizontal"}
+        fuel_flow.add{type = "label", caption = {"ai-bot.maintain-fuel"}}
+        for _, fuel in ipairs(fuel_list) do
+          fuel_flow.add{
+            type = "sprite-button",
+            name = "ai_mt_fuel_" .. name .. "_" .. fuel,
+            sprite = "item/" .. fuel,
+            tooltip = prototypes.item[fuel] and prototypes.item[fuel].localised_name or fuel,
+            tags = {ai_mt_fuel = name, ai_mt_field = "fuel", ai_mt_fuel_item = fuel},
+            style = rule.fuel == fuel and "yellow_slot_button" or "slot_button"
+          }
+        end
+        row.add{type = "label", name = "ai_mt_fuel_min_" .. name .. "_caption", caption = {"ai-bot.maintain-fuel-min"}}
+        local min_flow = row.add{type = "flow", name = "ai_mt_fuel_min_flow_" .. name, direction = "horizontal"}
+        min_flow.add{
+          type = "slider",
+          name = "ai_mt_fuel_min_" .. name,
+          minimum_value = 0,
+          maximum_value = 9999,
+          value = math.min(9999, rule.min or 0),
+          value_step = 1,
+          tags = {ai_mt_fuel = name, ai_mt_field = "min"}
+        }
+        min_flow.add{
+          type = "textfield",
+          name = "ai_mt_fuel_min_" .. name .. "_box",
+          text = tostring(rule.min or 0),
+          numeric = true,
+          allow_decimal = false,
+          allow_negative = false,
+          lose_focus_on_confirm = true,
+          tags = {ai_mt_fuel = name, ai_mt_field = "min"}
+        }.style.width = 60
+        row.add{type = "label", name = "ai_mt_fuel_max_" .. name .. "_caption", caption = {"ai-bot.maintain-fuel-max"}}
+        local max_flow = row.add{type = "flow", name = "ai_mt_fuel_max_flow_" .. name, direction = "horizontal"}
+        max_flow.add{
+          type = "slider",
+          name = "ai_mt_fuel_max_" .. name,
+          minimum_value = 0,
+          maximum_value = 9999,
+          value = math.min(9999, rule.max or 0),
+          value_step = 1,
+          tags = {ai_mt_fuel = name, ai_mt_field = "max"}
+        }
+        max_flow.add{
+          type = "textfield",
+          name = "ai_mt_fuel_max_" .. name .. "_box",
+          text = tostring(rule.max or 0),
+          numeric = true,
+          allow_decimal = false,
+          allow_negative = false,
+          lose_focus_on_confirm = true,
+          tags = {ai_mt_fuel = name, ai_mt_field = "max"}
         }.style.width = 60
       end
     end
@@ -314,6 +398,8 @@ function gui.close_planner(player)
   gui.close_lineplan(player)
 end
 
+local PLAN_STACK = 100
+
 function gui.give_plan_item(player, item_name)
   if not item_name or not prototypes.item[item_name] then
     return
@@ -327,8 +413,10 @@ function gui.give_plan_item(player, item_name)
   end
   local cursor = player.cursor_stack
   if cursor and cursor.valid then
-    -- 规划模式连续放置：一次选中，一直留在光标上。
-    cursor.set_stack({name = item_name, count = 1})
+    -- 一次给一整叠，按住拖放时不会每格补货导致同格连放。
+    local proto = prototypes.item[item_name]
+    local count = math.min(PLAN_STACK, proto and proto.stack_size or PLAN_STACK)
+    cursor.set_stack({name = item_name, count = count})
     player.cursor_stack_temporary = true
   end
 end
@@ -336,16 +424,21 @@ end
 function gui.schedule_plan_restore(player)
   local store = player_store(player)
   if store.planning and (store.lib_export or store.plan_item) then
-    store.plan_restore_tick = game.tick + 1
+    store.plan_hold = true
   end
 end
 
 function gui.flush_plan_restore(player)
   local store = player_store(player)
-  if store.plan_restore_tick and game.tick >= store.plan_restore_tick then
-    store.plan_restore_tick = nil
-    gui.restore_plan_item(player)
+  if not store.plan_hold then
+    return
   end
+  local cursor = player.cursor_stack
+  if cursor and cursor.valid_for_read then
+    return
+  end
+  store.plan_hold = nil
+  gui.restore_plan_item(player)
 end
 
 function gui.restore_plan_item(player)
@@ -517,6 +610,11 @@ end
 
 function gui.close(player)
   local store = player_store(player)
+  local frame = player.gui.screen[FRAME_NAME]
+  local tabs = frame and frame.ai_bot_tabs
+  if tabs then
+    gui.apply_settings(player, tabs.ai_bot_tab_settings)
+  end
   store.menu_open = false
   util.safe_destroy(player.gui.screen[FRAME_NAME])
   if player.is_shortcut_toggled("ai-bot-open-menu") then
@@ -566,7 +664,8 @@ function gui.open(player)
   tabs.add_tab(tab_res, res)
 
   local tab_set = tabs.add{type = "tab", name = "tab_set", caption = {"ai-bot.tab-settings"}}
-  local setf = tabs.add{type = "flow", name = "ai_bot_tab_settings", direction = "vertical"}
+  local setf = tabs.add{type = "scroll-pane", name = "ai_bot_tab_settings"}
+  setf.style.maximal_height = 360
   local function add_slider(name, caption, value, min_v, max_v, step)
     setf.add{type = "label", caption = caption}
     setf.add{
@@ -577,9 +676,19 @@ function gui.open(player)
       value = value,
       value_step = step
     }
-    setf.add{type = "label", name = name .. "_value", caption = tostring(value)}
+    setf.add{
+      type = "textfield",
+      name = name .. "_box",
+      text = tostring(math.floor(value)),
+      numeric = true,
+      allow_decimal = false,
+      allow_negative = false,
+      lose_focus_on_confirm = true
+    }.style.width = 72
+    setf.add{type = "label", name = name .. "_value", caption = tostring(math.floor(value))}
   end
   add_slider("ai_bot_set_radius", {"ai-bot.settings-search"}, util.player_setting(player, "ai-bot-search-radius", 512), 64, 2048, 64)
+  add_slider("ai_bot_set_job", {"ai-bot.settings-job"}, util.player_setting(player, "ai-bot-job-radius", 256), 32, 4096, 32)
   add_slider("ai_bot_set_warn", {"ai-bot.settings-warn"}, util.player_setting(player, "ai-bot-warn-threshold", 20), 0, 500, 5)
   add_slider("ai_bot_set_reserve", {"ai-bot.settings-reserve"}, util.player_setting(player, "ai-bot-reserve-stock", 50), 0, 500, 5)
   add_slider("ai_bot_set_range", {"ai-bot.settings-range"}, util.player_setting(player, "ai-bot-work-range", 24), 8, 64, 1)
@@ -608,8 +717,19 @@ function gui.open(player)
   local tab_mt = tabs.add{type = "tab", name = "tab_mt", caption = {"ai-bot.tab-maintain"}}
   local mt = tabs.add{type = "flow", name = "ai_bot_tab_maintain", direction = "vertical"}
   mt.add{type = "label", caption = {"ai-bot.maintain-hint"}}
-  local mt_box = mt.add{type = "scroll-pane", name = "ai_bot_mt_box"}
-  mt_box.style.maximal_height = 360
+  local mt_tabs = mt.add{type = "tabbed-pane", name = "ai_bot_mt_tabs"}
+  local tab_repair = mt_tabs.add{type = "tab", name = "tab_mt_repair", caption = {"ai-bot.tab-maintain-repair"}}
+  local repair_box = mt_tabs.add{type = "scroll-pane", name = "ai_bot_mt_repair"}
+  repair_box.style.maximal_height = 320
+  mt_tabs.add_tab(tab_repair, repair_box)
+  local tab_ammo = mt_tabs.add{type = "tab", name = "tab_mt_ammo", caption = {"ai-bot.tab-maintain-ammo"}}
+  local ammo_box = mt_tabs.add{type = "scroll-pane", name = "ai_bot_mt_ammo"}
+  ammo_box.style.maximal_height = 320
+  mt_tabs.add_tab(tab_ammo, ammo_box)
+  local tab_fuel = mt_tabs.add{type = "tab", name = "tab_mt_fuel", caption = {"ai-bot.tab-maintain-fuel"}}
+  local fuel_box = mt_tabs.add{type = "scroll-pane", name = "ai_bot_mt_fuel"}
+  fuel_box.style.maximal_height = 320
+  mt_tabs.add_tab(tab_fuel, fuel_box)
   tabs.add_tab(tab_mt, mt)
 
   if store.menu_location then
@@ -668,13 +788,53 @@ function gui.apply_maintain_change(player, tags, value)
     return
   end
   if tags.ai_mt_field == "repair" then
-    maintain.update_rule(bot.unit_number, nil, "repair", value)
+    maintain.update_rule(bot.unit_number, nil, "repair", value, player)
+    return
+  end
+  if tags.ai_mt_fuel then
+    local field = tags.ai_mt_field
+    local rule_value = value
+    if field == "fuel" then
+      rule_value = tags.ai_mt_fuel_item or value
+    end
+    local rule = maintain.update_fuel_rule(bot.unit_number, tags.ai_mt_fuel, field, rule_value, player)
+    if not rule then
+      return
+    end
+    if field == "fuel" or field == "enabled" then
+      player_store(player).mt_dirty = true
+      gui.refresh(player)
+      return
+    end
+    local box = maintain_pane(player, "ai_bot_mt_fuel")
+    local row = box and box["ai_mt_fuel_row_" .. tags.ai_mt_fuel]
+    if not row then
+      return
+    end
+    local min_flow = row["ai_mt_fuel_min_flow_" .. tags.ai_mt_fuel]
+    local max_flow = row["ai_mt_fuel_max_flow_" .. tags.ai_mt_fuel]
+    local min_slider = min_flow and min_flow["ai_mt_fuel_min_" .. tags.ai_mt_fuel]
+    local max_slider = max_flow and max_flow["ai_mt_fuel_max_" .. tags.ai_mt_fuel]
+    local min_box = min_flow and min_flow["ai_mt_fuel_min_" .. tags.ai_mt_fuel .. "_box"]
+    local max_box = max_flow and max_flow["ai_mt_fuel_max_" .. tags.ai_mt_fuel .. "_box"]
+    if min_slider then
+      min_slider.slider_value = math.min(9999, rule.min or 0)
+    end
+    if max_slider then
+      max_slider.slider_value = math.min(9999, rule.max or 0)
+    end
+    if min_box and min_box.text ~= tostring(rule.min or 0) then
+      min_box.text = tostring(rule.min or 0)
+    end
+    if max_box and max_box.text ~= tostring(rule.max or 0) then
+      max_box.text = tostring(rule.max or 0)
+    end
     return
   end
   if not tags.ai_mt_turret then
     return
   end
-  local rule = maintain.update_rule(bot.unit_number, tags.ai_mt_turret, tags.ai_mt_field, value)
+  local rule = maintain.update_rule(bot.unit_number, tags.ai_mt_turret, tags.ai_mt_field, value, player)
   if not rule then
     return
   end
@@ -683,8 +843,7 @@ function gui.apply_maintain_change(player, tags, value)
     gui.refresh(player)
     return
   end
-  local frame = player.gui.screen[FRAME_NAME]
-  local box = frame and frame.ai_bot_tabs and frame.ai_bot_tabs.ai_bot_tab_maintain and frame.ai_bot_tabs.ai_bot_tab_maintain.ai_bot_mt_box
+  local box = maintain_pane(player, "ai_bot_mt_ammo")
   local row = box and box["ai_mt_row_" .. tags.ai_mt_turret]
   if not row then
     return
@@ -722,24 +881,58 @@ function gui.apply_settings(player, setf)
   local player_settings = settings.get_player_settings(player)
   local function write_slider(name, setting_name)
     local slider = setf[name]
-    if not slider then
+    local box = setf[name .. "_box"]
+    if not slider and not box then
       return
     end
-    local value = math.floor(slider.slider_value)
+    local value
+    if box and box.text and box.text ~= "" then
+      value = math.floor(tonumber(box.text) or 0)
+    elseif slider then
+      value = math.floor(slider.slider_value)
+    else
+      return
+    end
+    local bounds = {
+      ["ai-bot-search-radius"] = {64, 2048},
+      ["ai-bot-job-radius"] = {32, 4096},
+      ["ai-bot-warn-threshold"] = {0, 10000},
+      ["ai-bot-reserve-stock"] = {0, 10000},
+      ["ai-bot-work-range"] = {8, 64},
+      ["ai-bot-wait-timeout"] = {10, 3600}
+    }
+    local range = bounds[setting_name]
+    if range then
+      value = math.max(range[1], math.min(range[2], value))
+    end
+    if slider then
+      local slider_min = slider.get_slider_minimum and slider.get_slider_minimum() or range and range[1] or 0
+      local slider_max = slider.get_slider_maximum and slider.get_slider_maximum() or range and range[2] or value
+      slider.slider_value = math.max(slider_min, math.min(slider_max, value))
+    end
+    if box and box.text ~= tostring(value) then
+      box.text = tostring(value)
+    end
     player_settings[setting_name] = {value = value}
     if setf[name .. "_value"] then
       setf[name .. "_value"].caption = tostring(value)
     end
   end
   write_slider("ai_bot_set_radius", "ai-bot-search-radius")
+  write_slider("ai_bot_set_job", "ai-bot-job-radius")
   write_slider("ai_bot_set_warn", "ai-bot-warn-threshold")
   write_slider("ai_bot_set_reserve", "ai-bot-reserve-stock")
   write_slider("ai_bot_set_range", "ai-bot-work-range")
   write_slider("ai_bot_set_timeout", "ai-bot-wait-timeout")
-  player_settings["ai-bot-force-build"] = {value = setf.ai_bot_set_force.state}
-  player_settings["ai-bot-take-from-network"] = {value = setf.ai_bot_set_network.state}
-  player_settings["ai-bot-take-from-player"] = {value = setf.ai_bot_set_player.state}
-  player.print({"ai-bot.settings-saved"})
+  if setf.ai_bot_set_force then
+    player_settings["ai-bot-force-build"] = {value = setf.ai_bot_set_force.state}
+  end
+  if setf.ai_bot_set_network then
+    player_settings["ai-bot-take-from-network"] = {value = setf.ai_bot_set_network.state}
+  end
+  if setf.ai_bot_set_player then
+    player_settings["ai-bot-take-from-player"] = {value = setf.ai_bot_set_player.state}
+  end
 end
 
 return gui

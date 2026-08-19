@@ -224,21 +224,18 @@ function builder.revive_batch(player, bot, job, batch_size)
   end
   local revived = 0
   local still = {}
+  local have_map = inventory.scan_available(
+    player,
+    bot,
+    false,
+    util.player_setting(player, "ai-bot-take-from-player", true)
+  )
   for _, ghost in pairs(job.ghosts or {}) do
     if ghost.valid then
       if revived < batch_size then
         local item_name = ghost_item_name(ghost)
         local quality = util.quality_name(ghost.quality)
-        local have = 0
-        if util.valid_entity(bot) then
-          local trunk = bot.get_inventory(defines.inventory.spider_trunk)
-          if trunk then
-            have = util.count_item(trunk, item_name)
-          end
-        end
-        if have < 1 and util.player_setting(player, "ai-bot-take-from-player", true) then
-          have = util.count_item(player, item_name)
-        end
+        local have = util.get_count(have_map, item_name, quality)
         if have >= 1 then
           local is_tile = ghost.type == "tile-ghost"
           -- 幽灵复活后会失效，配方必须先读出来。
@@ -253,12 +250,12 @@ function builder.revive_batch(player, bot, job, batch_size)
           revived_entity = ok_rev and revived_entity or nil
           local tile_ok = is_tile and (not ghost.valid)
           if revived_entity or tile_ok then
-            local taken = 0
-            if util.valid_entity(bot) then
-              taken = inventory.try_remove_from_bot(bot, item_name, quality, 1)
-            end
+            local taken = inventory.try_remove_from_fleet(player, item_name, quality, 1, bot)
             if taken < 1 and util.player_setting(player, "ai-bot-take-from-player", true) then
               inventory.try_remove_from_player(player, item_name, quality, 1)
+            end
+            if have_map[util.item_key(item_name, quality)] then
+              have_map[util.item_key(item_name, quality)].count = math.max(0, have - 1)
             end
             if revived_entity and revived_entity.valid then
               pcall(function()
@@ -316,14 +313,11 @@ function builder.move_bot(bot, position)
     y = position.y or position[2]
   }
   local current = bot.autopilot_destination
-  if current and util.distance(current, dest) < 2 then
+  if current and util.distance(current, dest) < 4 then
     return
   end
   pcall(function()
     bot.follow_target = nil
-  end)
-  pcall(function()
-    bot.stop_spider()
   end)
   bot.autopilot_destination = dest
   if not bot.autopilot_destination then

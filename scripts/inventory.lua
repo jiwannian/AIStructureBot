@@ -18,6 +18,41 @@ local function add_bot_inventories(bot, map)
   util.count_inventory(bot.get_inventory(defines.inventory.spider_trash), map)
 end
 
+function inventory.invalidate_scan()
+  storage.scan_cache = nil
+end
+
+function inventory.list_force_bots(player)
+  if not player or not player.valid then
+    return {}
+  end
+  storage.fleet_cache = storage.fleet_cache or {}
+  local key = player.force.index or player.force.name
+  local cache = storage.fleet_cache[key]
+  if cache and cache.tick == game.tick then
+    return cache.bots
+  end
+  local bots = {}
+  for _, surface in pairs(game.surfaces) do
+    for _, bot in pairs(surface.find_entities_filtered{
+      name = "ai-structure-bot",
+      force = player.force
+    }) do
+      if bot.valid then
+        table.insert(bots, bot)
+      end
+    end
+  end
+  storage.fleet_cache[key] = {tick = game.tick, bots = bots}
+  return bots
+end
+
+local function add_fleet_inventories(player, map)
+  for _, bot in ipairs(inventory.list_force_bots(player)) do
+    add_bot_inventories(bot, map)
+  end
+end
+
 local function each_network(force, surface, handler)
   local grouped = force.logistic_networks
   local networks = grouped and grouped[surface.name]
@@ -40,21 +75,28 @@ local function add_logistic_networks(force, surface, map)
 end
 
 function inventory.scan_available(player, bot, include_network, include_player)
+  storage.scan_cache = storage.scan_cache or {}
+  local key = tostring(player.index) .. "|" .. tostring(include_network and true or false) .. "|" .. tostring(include_player and true or false)
+  local cache = storage.scan_cache[key]
+  if cache and cache.tick == game.tick then
+    return cache.map
+  end
   local map = {}
   if include_player then
     add_player_inventories(player, map)
   end
-  add_bot_inventories(bot, map)
+  add_fleet_inventories(player, map)
   if include_network then
     add_logistic_networks(player.force, player.surface, map)
   end
+  storage.scan_cache[key] = {tick = game.tick, map = map}
   return map
 end
 
 function inventory.scan_sources(player, bot)
   local player_map, bot_map, net_map = {}, {}, {}
   add_player_inventories(player, player_map)
-  add_bot_inventories(bot, bot_map)
+  add_fleet_inventories(player, bot_map)
   add_logistic_networks(player.force, player.surface, net_map)
   local all = {}
   util.merge_counts(all, bot_map)
@@ -100,11 +142,45 @@ function inventory.try_remove_from_bot(bot, name, quality, count)
   if not util.valid_entity(bot) or count <= 0 then
     return 0
   end
+  inventory.invalidate_scan()
+  local left = count
   local trunk = bot.get_inventory(defines.inventory.spider_trunk)
-  if not trunk then
+  if trunk then
+    left = left - (trunk.remove({name = name, count = left, quality = quality}) or 0)
+  end
+  if left > 0 then
+    local trash = bot.get_inventory(defines.inventory.spider_trash)
+    if trash then
+      left = left - (trash.remove({name = name, count = left, quality = quality}) or 0)
+    end
+  end
+  return count - left
+end
+
+function inventory.try_remove_from_fleet(player, name, quality, count, prefer_bot)
+  if count <= 0 then
     return 0
   end
-  return trunk.remove({name = name, count = count, quality = quality}) or 0
+  local left = count
+  if prefer_bot and prefer_bot.valid then
+    left = left - inventory.try_remove_from_bot(prefer_bot, name, quality, left)
+  end
+  if left <= 0 then
+    return count
+  end
+  for _, bot in ipairs(inventory.list_force_bots(player)) do
+    if not prefer_bot or bot.unit_number ~= prefer_bot.unit_number then
+      left = left - inventory.try_remove_from_bot(bot, name, quality, left)
+      if left <= 0 then
+        break
+      end
+    end
+  end
+  return count - left
+end
+
+function inventory.count_fleet_item(player, name)
+  return util.get_count(inventory.scan_available(player, nil, false, false), name, "normal")
 end
 
 function inventory.try_remove_from_network(player, name, quality, count)
@@ -154,6 +230,20 @@ function inventory.collect_items(player, bot, need_map)
       end
     end
     local taken_outside = 0
+    if remain > 0 then
+      local from_others = 0
+      for _, other in ipairs(inventory.list_force_bots(player)) do
+        if remain > 0 and (not bot or not bot.valid or other.unit_number ~= bot.unit_number) then
+          local took = inventory.try_remove_from_bot(other, need.name, need.quality, remain)
+          from_others = from_others + took
+          remain = remain - took
+        end
+      end
+      if from_others > 0 then
+        inventory.insert_or_refund(player, bot, need.name, need.quality, from_others)
+        already_in_bot = already_in_bot + from_others
+      end
+    end
     if remain > 0 and util.player_setting(player, "ai-bot-take-from-player", true) then
       local from_player = inventory.try_remove_from_player(player, need.name, need.quality, remain)
       taken_outside = taken_outside + from_player
@@ -174,6 +264,7 @@ function inventory.collect_items(player, bot, need_map)
       remain = remain
     }
   end
+  inventory.invalidate_scan()
   return collected
 end
 

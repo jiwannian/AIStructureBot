@@ -167,6 +167,13 @@ script.on_event("ai-bot-assign-ghosts", function(event)
   end
 end)
 
+script.on_event("ai-bot-plan-mine", function(event)
+  local player = game.get_player(event.player_index)
+  if player then
+    plan.cancel_selected_ghost(player)
+  end
+end)
+
 script.on_event(defines.events.on_lua_shortcut, function(event)
   local player = game.get_player(event.player_index)
   if event.prototype_name == "ai-bot-open-menu" then
@@ -221,6 +228,10 @@ script.on_event(defines.events.on_gui_click, function(event)
   end
   if element.tags and element.tags.ai_mt_field == "ammo" then
     gui.apply_maintain_change(player, element.tags, element.tags.ai_mt_ammo)
+    return
+  end
+  if element.tags and element.tags.ai_mt_field == "fuel" then
+    gui.apply_maintain_change(player, element.tags, element.tags.ai_mt_fuel_item)
     return
   end
   if element.name == "ai_bot_recall" then
@@ -317,6 +328,21 @@ script.on_event(defines.events.on_gui_text_changed, function(event)
   end
 end)
 
+script.on_event(defines.events.on_gui_confirmed, function(event)
+  local element = event.element
+  local player = game.get_player(event.player_index)
+  if not player or not element or not element.valid then
+    return
+  end
+  if element.name and string.sub(element.name, 1, 11) == "ai_bot_set_" then
+    local frame = player.gui.screen.ai_bot_frame
+    local tabs = frame and frame.ai_bot_tabs
+    gui.apply_settings(player, tabs and tabs.ai_bot_tab_settings)
+  elseif element.tags and (element.tags.ai_mt_field == "min" or element.tags.ai_mt_field == "max") then
+    gui.apply_maintain_change(player, element.tags, element.text)
+  end
+end)
+
 script.on_event(defines.events.on_gui_checked_state_changed, function(event)
   local player = game.get_player(event.player_index)
   local element = event.element
@@ -325,6 +351,10 @@ script.on_event(defines.events.on_gui_checked_state_changed, function(event)
   end
   if element.tags and (element.tags.ai_mt_field == "enabled" or element.tags.ai_mt_field == "repair") then
     gui.apply_maintain_change(player, element.tags, element.state)
+  elseif element.name == "ai_bot_set_force" or element.name == "ai_bot_set_network" or element.name == "ai_bot_set_player" then
+    local frame = player.gui.screen.ai_bot_frame
+    local tabs = frame and frame.ai_bot_tabs
+    gui.apply_settings(player, tabs and tabs.ai_bot_tab_settings)
   end
 end)
 
@@ -338,11 +368,20 @@ script.on_event(defines.events.on_gui_value_changed, function(event)
   if value_label then
     value_label.caption = tostring(math.floor(element.slider_value))
   end
+  local value_box = parent and parent[element.name .. "_box"]
+  if value_box then
+    value_box.text = tostring(math.floor(element.slider_value))
+  end
+  local player = game.get_player(event.player_index)
+  if not player then
+    return
+  end
   if element.tags and (element.tags.ai_mt_field == "min" or element.tags.ai_mt_field == "max") then
-    local player = game.get_player(event.player_index)
-    if player then
-      gui.apply_maintain_change(player, element.tags, element.slider_value)
-    end
+    gui.apply_maintain_change(player, element.tags, element.slider_value)
+  elseif element.name and string.sub(element.name, 1, 11) == "ai_bot_set_" then
+    local frame = player.gui.screen.ai_bot_frame
+    local tabs = frame and frame.ai_bot_tabs
+    gui.apply_settings(player, tabs and tabs.ai_bot_tab_settings)
   end
 end)
 
@@ -374,6 +413,13 @@ end)
 script.on_event(defines.events.on_player_alt_selected_area, function(event)
   if event.item == "ai-bot-assign-tool" then
     try_assign_from_selection(game.get_player(event.player_index), event.entities)
+  end
+end)
+
+script.on_event(defines.events.on_pre_build, function(event)
+  local player = event.player_index and game.get_player(event.player_index)
+  if player then
+    plan.remember_build(player, event)
   end
 end)
 

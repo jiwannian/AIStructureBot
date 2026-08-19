@@ -167,6 +167,15 @@ data:extend({
     localised_name = {"controls.ai-bot-assign-ghosts"}
   },
   {
+    type = "custom-input",
+    name = "ai-bot-plan-mine",
+    key_sequence = "",
+    linked_game_control = "mine",
+    consuming = "game-only",
+    action = "lua",
+    localised_name = {"controls.ai-bot-plan-mine"}
+  },
+  {
     type = "shortcut",
     name = "ai-bot-toggle-plan",
     action = "lua",

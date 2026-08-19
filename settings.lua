@@ -29,6 +29,15 @@ data:extend({
   },
   {
     type = "int-setting",
+    name = "ai-bot-job-radius",
+    setting_type = "runtime-per-user",
+    minimum_value = 32,
+    maximum_value = 4096,
+    default_value = 256,
+    order = "c2"
+  },
+  {
+    type = "int-setting",
     name = "ai-bot-warn-threshold",
     setting_type = "runtime-per-user",
     minimum_value = 0,

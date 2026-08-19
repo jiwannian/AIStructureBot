@@ -109,27 +109,18 @@ function craft.is_raw_resource(item_name)
 end
 
 function craft.find_nearest_resource(surface, position, resource_name)
-  -- 不设 limit，避免每拍抽样到不同矿格，导致目的地来回跳。
-  local radii = {80, 320, 1280, 4096}
+  local radii = {32, 96, 256, 768}
   for _, radius in ipairs(radii) do
     local found = surface.find_entities_filtered{
       position = position,
       radius = radius,
       name = resource_name,
-      type = "resource"
+      type = "resource",
+      limit = 1
     }
-    local best, best_dist
-    for _, entity in pairs(found) do
-      if entity.valid and (entity.amount or 0) > 0 then
-        local dist = util.distance(position, entity.position)
-        if not best_dist or dist < best_dist then
-          best = entity
-          best_dist = dist
-        end
-      end
-    end
-    if best then
-      return best, best_dist
+    local entity = found and found[1]
+    if entity and entity.valid and (entity.amount or 0) > 0 then
+      return entity, util.distance(position, entity.position)
     end
   end
   return nil, nil
@@ -203,31 +194,16 @@ function craft.mine_enough(bot, player, resource_name, want, origin, include_pla
 end
 
 local function count_have(bot, player, name, include_player)
-  local total = 0
+  local total = inventory.count_fleet_item(player, name)
   if include_player ~= false then
     total = total + util.count_item(player, name)
-  end
-  if util.valid_entity(bot) then
-    local trunk = bot.get_inventory(defines.inventory.spider_trunk)
-    if trunk then
-      total = total + util.count_item(trunk, name)
-    end
-    local trash = bot.get_inventory(defines.inventory.spider_trash)
-    if trash then
-      total = total + util.count_item(trash, name)
-    end
   end
   return total
 end
 
 local function take(bot, player, name, count, include_player)
   local left = count
-  if util.valid_entity(bot) then
-    local trunk = bot.get_inventory(defines.inventory.spider_trunk)
-    if trunk then
-      left = left - (trunk.remove({name = name, count = left}) or 0)
-    end
-  end
+  left = left - inventory.try_remove_from_fleet(player, name, "normal", left, bot)
   if left > 0 and include_player ~= false then
     left = left - (player.remove_item({name = name, count = left}) or 0)
   end
@@ -311,22 +287,20 @@ function craft.expand_needs(force, item_name, count, mines, crafts, need_machine
 end
 
 function craft.find_nearest_tree(surface, position)
-  local trees = surface.find_entities_filtered{
-    position = position,
-    radius = 2048,
-    type = "tree"
-  }
-  local best, best_dist
-  for _, tree in pairs(trees) do
-    if tree.valid then
-      local dist = util.distance(position, tree.position)
-      if not best_dist or dist < best_dist then
-        best = tree
-        best_dist = dist
-      end
+  local radii = {32, 96, 256, 768}
+  for _, radius in ipairs(radii) do
+    local trees = surface.find_entities_filtered{
+      position = position,
+      radius = radius,
+      type = "tree",
+      limit = 1
+    }
+    local tree = trees and trees[1]
+    if tree and tree.valid then
+      return tree, util.distance(position, tree.position)
     end
   end
-  return best, best_dist
+  return nil, nil
 end
 
 function craft.search_origin(player, job, bot)

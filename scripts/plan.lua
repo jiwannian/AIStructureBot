@@ -202,6 +202,65 @@ local PAIR_DELAY_TYPES = {
   ["pipe-to-ground"] = true,
   ["linked-belt"] = true
 }
+local PAIR_IDLE_TICKS = 30
+
+local function from_orientation(orientation)
+  if orientation == nil then
+    return nil
+  end
+  local ok, mapped = pcall(function()
+    return defines.direction.from_orientation(orientation)
+  end)
+  if ok then
+    return mapped
+  end
+  return math.floor(((orientation % 1) * 16) + 0.5) % 16
+end
+
+function plan.remember_build(player, event)
+  if not player or not player.valid or not plan.is_on(player) then
+    return
+  end
+  local store = store_of(player)
+  store.plan_build = {
+    tick = game.tick,
+    direction = event.direction,
+    created = event.created_entity_count
+  }
+end
+
+function plan.existing_plan_ghost(surface, force, name, position)
+  if not surface or not position then
+    return nil
+  end
+  local found = surface.find_entities_filtered{
+    name = "entity-ghost",
+    force = force,
+    position = position,
+    radius = 0.2
+  }
+  for _, ghost in pairs(found) do
+    if ghost.valid and ghost.ghost_name == name then
+      return ghost
+    end
+  end
+  return nil
+end
+
+function plan.cancel_selected_ghost(player)
+  if not player or not player.valid or not plan.is_on(player) then
+    return false
+  end
+  local selected = player.selected
+  if not selected or not selected.valid then
+    return false
+  end
+  if selected.type ~= "entity-ghost" and selected.type ~= "tile-ghost" then
+    return false
+  end
+  selected.destroy({raise_destroy = false})
+  return true
+end
 
 function plan.queue_or_convert(player, entity)
   if not plan.is_on(player) or not entity or not entity.valid then
@@ -209,6 +268,7 @@ function plan.queue_or_convert(player, entity)
   end
   if PAIR_DELAY_TYPES[entity.type] then
     storage.plan_pair_queue = storage.plan_pair_queue or {}
+    storage.plan_pair_last_tick = game.tick
     table.insert(storage.plan_pair_queue, {
       entity = entity,
       player_index = player.index,
@@ -238,30 +298,31 @@ function plan.block_controller_gui(player)
   end
 end
 
-function plan.flush_pair_queue()
+function plan.flush_pair_queue(force)
   local queue = storage.plan_pair_queue
   if not queue or #queue == 0 then
     return
   end
-  local keep = {}
+  if not force and storage.plan_pair_last_tick and game.tick - storage.plan_pair_last_tick < PAIR_IDLE_TICKS then
+    return
+  end
   for _, item in ipairs(queue) do
-    if not item.entity or not item.entity.valid then
-      -- 已失效
-    elseif game.tick - item.tick < 2 then
-      table.insert(keep, item)
-    else
+    if item.entity and item.entity.valid then
       local player = game.get_player(item.player_index)
-      if player and plan.is_on(player) then
-        plan.convert_built_to_ghost(player, item.entity)
+      if player and player.valid then
+        plan.convert_built_to_ghost(player, item.entity, true)
       end
     end
   end
-  storage.plan_pair_queue = keep
+  storage.plan_pair_queue = {}
 end
 
 -- 规划时放下的实体改成幽灵，不扣材料。地下带保留 input/output。
-function plan.convert_built_to_ghost(player, entity)
-  if not plan.is_on(player) or not entity or not entity.valid then
+function plan.convert_built_to_ghost(player, entity, allow_after_plan)
+  if not player or not player.valid or not entity or not entity.valid then
+    return false
+  end
+  if not allow_after_plan and not plan.is_on(player) then
     return false
   end
   if entity.type == "entity-ghost" or entity.type == "tile-ghost" then
@@ -270,15 +331,26 @@ function plan.convert_built_to_ghost(player, entity)
   if entity.name == "ai-structure-bot" or entity.type == "spider-vehicle" then
     return false
   end
+  local existing = plan.existing_plan_ghost(entity.surface, entity.force, entity.name, entity.position)
+  if existing and existing.valid then
+    existing.destroy({raise_destroy = false})
+  end
   local proto = entity.prototype
   if not proto or not util.item_place_name(proto) then
     return false
   end
   local surface = entity.surface
+  local store = store_of(player)
+  local remembered = store.plan_build
+  local remembered_dir
+  if remembered and remembered.tick == game.tick then
+    remembered_dir = remembered.direction
+  end
   local info = {
     name = entity.name,
     position = entity.position,
-    direction = entity.direction,
+    direction = remembered_dir or entity.direction,
+    orientation = entity.orientation,
     force = entity.force,
     quality = entity.quality and entity.quality.name or nil,
     mirror = entity.mirroring,
@@ -292,7 +364,6 @@ function plan.convert_built_to_ghost(player, entity)
     info.recipe = recipe and (recipe.name or recipe)
   end)
   if not info.recipe then
-    local store = store_of(player)
     local stamp = store.lineplan_stamp
     if stamp and stamp.recipes and stamp.position then
       info.recipe = lineplan.recipe_at(stamp.recipes, stamp.position, info.position)
@@ -305,6 +376,7 @@ function plan.convert_built_to_ghost(player, entity)
     info.linked_type = entity.linked_belt_type
   end)
   entity.destroy({raise_destroy = false})
+  -- 不要把 orientation 传给 create_entity：组装机/传送带会创建失败，规划就摆不了。
   local ghost = surface.create_entity{
     name = "entity-ghost",
     inner_name = info.name,
@@ -317,6 +389,17 @@ function plan.convert_built_to_ghost(player, entity)
     raise_built = false
   }
   if ghost and ghost.valid then
+    local facing = info.direction or from_orientation(info.orientation)
+    if facing ~= nil then
+      pcall(function()
+        ghost.direction = facing
+      end)
+    end
+    if info.orientation ~= nil then
+      pcall(function()
+        ghost.orientation = info.orientation
+      end)
+    end
     if info.mirror then
       ghost.mirroring = true
     end
@@ -641,14 +724,11 @@ function plan.nudge_assign(player)
       end
     end
   end
+  player.print({"ai-bot.job-nudged", tostring(#builders)})
 end
 
 function plan.toggle_assign(player, radius)
-  -- Shift+B 只派工/催工，不再来回开关。停工请用菜单「停止派工」。
-  if plan.has_job(player) then
-    plan.nudge_assign(player)
-    return
-  end
+  -- Shift+B 只派工/催工，不再来回开关。停工请点菜单「停止派工」。
   plan.assign_nearby(player, radius)
 end
 
@@ -656,7 +736,13 @@ function plan.assign_nearby(player, radius)
   if plan.is_on(player) then
     plan.set(player, false)
   end
+  if plan.has_job(player) then
+    plan.nudge_assign(player)
+    return
+  end
+  radius = radius or util.job_radius(player)
   local builders = {}
+  local maintain_count = 0
   for _, bot in ipairs(player.surface.find_entities_filtered{
     name = "ai-structure-bot",
     force = player.force
@@ -670,12 +756,10 @@ function plan.assign_nearby(player, radius)
         bot_state.recalling = false
         bot.active = true
         table.insert(builders, bot)
+      else
+        maintain_count = maintain_count + 1
       end
     end
-  end
-  if #builders == 0 then
-    player.print({"ai-bot.no-build-bot"})
-    return
   end
   -- 派工必须解冻世界，并唤醒蜘蛛腿；规划冻结会把腿冻住，只开身体不会走。
   plan.sync_world_freeze()
@@ -742,7 +826,7 @@ function plan.assign_nearby(player, radius)
   if player_settings["ai-bot-take-from-player"] and player_settings["ai-bot-take-from-player"].value == false then
     player_settings["ai-bot-take-from-player"] = {value = true}
   end
-  -- 只派建造模式的 Bot 去工地，维护模式的一只都不动。
+  -- 建造 Bot 立刻去工地；维护 Bot 继续自己的活，任务先入队等建造 Bot 来做。
   for _, bot in ipairs(builders) do
     if bot.valid then
       builder.wake_bot(bot)
@@ -753,12 +837,19 @@ function plan.assign_nearby(player, radius)
   if #marked > 0 then
     player.print({"ai-bot.job-deconstruct", tostring(#marked)})
   end
-  local have = inventory.scan_available(player, builders[1], false, true)
-  local missing = inventory.diff(cost, have)
-  if next(missing) then
-    player.print({"ai-bot.wait-need-title"})
-    for _, line in ipairs(inventory.list_missing(missing)) do
-      player.print(line)
+  if #builders == 0 then
+    player.print({"ai-bot.no-build-bot"})
+  elseif maintain_count > 0 then
+    player.print({"ai-bot.job-with-maintain", tostring(#builders), tostring(maintain_count)})
+  end
+  if builders[1] then
+    local have = inventory.scan_available(player, builders[1], false, true)
+    local missing = inventory.diff(cost, have)
+    if next(missing) then
+      player.print({"ai-bot.wait-need-title"})
+      for _, line in ipairs(inventory.list_missing(missing)) do
+        player.print(line)
+      end
     end
   end
   return job

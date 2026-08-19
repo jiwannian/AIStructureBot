@@ -15,6 +15,27 @@ function util.player_setting(player, name, fallback)
   return fallback
 end
 
+function util.player_origin(player)
+  if player and player.character and player.character.valid then
+    return player.character.position
+  end
+  if player then
+    return player.position
+  end
+  return {x = 0, y = 0}
+end
+
+function util.job_radius(player)
+  local value = math.floor(tonumber(util.player_setting(player, "ai-bot-job-radius", 256)) or 256)
+  if value < 32 then
+    return 32
+  end
+  if value > 4096 then
+    return 4096
+  end
+  return value
+end
+
 function util.global_setting(name, fallback)
   local settings_map = settings.global
   if settings_map and settings_map[name] then

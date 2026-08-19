@@ -31,10 +31,7 @@ local function auto_assign_bot(player)
   if bot then
     return bot
   end
-  local bots = player.surface.find_entities_filtered{
-    name = "ai-structure-bot",
-    force = player.force
-  }
+  local bots = maintain.list_bots(player)
   if bots[1] then
     gui.assign_bot(player, bots[1])
     return bots[1]
@@ -70,9 +67,7 @@ local function process_job(player, store, bot, job)
     job.wait_started = nil
   end
 
-  -- 只按还没建完的幽灵计料，避免建完一座又按整单去挖矿。
-  builder.refresh_job_ghosts(player, job)
-  builder.refresh_marked(player, job)
+  -- 幽灵/拆除列表由 tick_player 每拍刷新一次，这里只按当前列表计料。
   local need = builder.remaining_cost(job)
   if (not next(need)) and job.export then
     need = job.cost or blueprint.item_cost_from_export(job.export)
@@ -95,8 +90,7 @@ local function process_job(player, store, bot, job)
     if ghost.valid then
       local item_name = util.item_place_name(ghost.ghost_prototype) or ghost.ghost_name
       if item_name then
-        local trunk = util.valid_entity(bot) and bot.get_inventory(defines.inventory.spider_trunk)
-        if util.count_item(trunk, item_name) > 0 or util.count_item(player, item_name) > 0 then
+        if util.get_count(have, item_name, "normal") > 0 then
           can_build_now = true
           break
         end
@@ -209,8 +203,6 @@ local function process_job(player, store, bot, job)
     end
   end
   local revived, remain = builder.revive_batch(player, bot, job, batch)
-  builder.refresh_job_ghosts(player, job)
-  builder.refresh_marked(player, job)
   remain = #(job.ghosts or {})
   local marked_left = job.marked and #job.marked or 0
   if remain == 0 and marked_left == 0 then
@@ -255,47 +247,58 @@ function ai.tick_player(player)
     return
   end
   store.no_bot_announced = false
-  local maintain_bots = maintain.list_mode_bots(player, "maintain")
-  local build_bots = maintain.list_mode_bots(player, "build")
+  local maintain_bots = {}
+  local build_bots = {}
+  for _, worker in ipairs(maintain.list_bots(player)) do
+    if worker.valid then
+      local worker_state = maintain.get_bot_state(worker.unit_number)
+      if not worker_state.paused and not worker_state.recalling then
+        if worker_state.mode == "maintain" then
+          table.insert(maintain_bots, worker)
+        elseif worker_state.mode == "build" then
+          table.insert(build_bots, worker)
+        end
+      end
+    end
+  end
 
-  -- 每只维护 Bot 独立跑；只有一只时拿下全部任务，多只按就近认领。
-  if #maintain_bots > 0 then
+  -- 建造和维护同一拍都跑。先建造，避免维护全图扫描把建造挤掉。
+  if store.queue and #store.queue > 0 and #build_bots > 0 then
+    local job = store.queue[1]
+    builder.refresh_job_ghosts(player, job)
+    builder.refresh_marked(player, job)
+    store.last_status = "build"
+    for _, worker in ipairs(build_bots) do
+      if maintain.get_bot_state(worker.unit_number).mode ~= "maintain" then
+        if not store.queue[1] or store.queue[1] ~= job then
+          break
+        end
+        local ok, err = pcall(process_job, player, store, worker, job)
+        if not ok then
+          job.status = "failed"
+          store.last_status = "failed"
+          job.fail_count = (job.fail_count or 0) + 1
+          if job.fail_count <= 2 then
+            player.print(err)
+          end
+          if job.fail_count >= 3 then
+            finish_job(player, store, job, "failed")
+            break
+          end
+        end
+      end
+    end
+  elseif #maintain_bots > 0 then
     store.last_status = "maintain"
+  elseif store.last_status ~= "idle" and store.last_status ~= "done" then
+    store.last_status = "idle"
+  end
+
+  if #maintain_bots > 0 then
     for _, worker in ipairs(maintain_bots) do
       local ok, err = pcall(maintain.tick, player, worker, maintain_bots)
       if not ok then
         player.print(err)
-      end
-    end
-  end
-
-  if not store.queue or #store.queue == 0 then
-    if #maintain_bots == 0 and store.last_status ~= "idle" and store.last_status ~= "done" then
-      store.last_status = "idle"
-    end
-    return
-  end
-  if #build_bots == 0 then
-    return
-  end
-  local job = store.queue[1]
-  for _, worker in ipairs(build_bots) do
-    if maintain.get_bot_state(worker.unit_number).mode ~= "maintain" then
-      if not store.queue[1] or store.queue[1] ~= job then
-        break
-      end
-      local ok, err = pcall(process_job, player, store, worker, job)
-      if not ok then
-        job.status = "failed"
-        store.last_status = "failed"
-        job.fail_count = (job.fail_count or 0) + 1
-        if job.fail_count <= 2 then
-          player.print(err)
-        end
-        if job.fail_count >= 3 then
-          finish_job(player, store, job, "failed")
-          break
-        end
       end
     end
   end

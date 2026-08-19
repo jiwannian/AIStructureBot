@@ -79,12 +79,13 @@ class SourceContractTest(unittest.TestCase):
         self.assertIn("function builder.job_has_work(job)", BUILDER_LUA)
 
     def test_process_job_refreshes_marks_before_empty_finish(self):
-        start = AI_LUA.index("function process_job")
-        body = AI_LUA[start:]
-        refresh = body.index("builder.refresh_marked")
-        has_work = body.index("builder.job_has_work")
-        finish = body.index('finish_job(player, store, job, "done")')
-        self.assertLess(refresh, has_work)
+        tick = AI_LUA[AI_LUA.index("function ai.tick_player") :]
+        process = AI_LUA[AI_LUA.index("local function process_job") : AI_LUA.index("function ai.tick_player")]
+        refresh = tick.index("builder.refresh_marked")
+        workers = tick.index("for _, worker in ipairs(build_bots)")
+        has_work = process.index("builder.job_has_work")
+        finish = process.index('finish_job(player, store, job, "done")')
+        self.assertLess(refresh, workers)
         self.assertLess(has_work, finish)
 
     def test_old_empty_ghost_shortcut_is_gone(self):
